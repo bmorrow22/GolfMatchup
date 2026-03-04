@@ -5,6 +5,7 @@ export interface Player {
   name: string;
   email: string;
   hc: number;
+  role?: 'ADMIN' | 'PLAYER'; // Added role to the Player interface
   team: 'A' | 'B' | 'UNASSIGNED';
   groupId: number | null;
 }
@@ -29,18 +30,32 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
   });
 
   const [allRegisteredPlayers, setAllRegisteredPlayers] = useState<Player[]>([]);
+  const [currentUser] = useState({ id: 'user_123', role: 'ADMIN' });
 
-  // Fixed: Single, robust join function
+  // 1. Join Logic
   const joinTournament = (user: Player) => {
     setAllRegisteredPlayers(prev => [...prev, user]);
-    // We add them to the active roster immediately but unassigned
     setConfig(prev => ({
       ...prev,
       players: [...prev.players, { ...user, team: 'UNASSIGNED', groupId: null }]
     }));
   };
 
-  const [currentUser] = useState({ id: 'user_123', role: 'ADMIN' });
+  // 2. Admin Logic: Update Handicap
+  const updatePlayerHandicap = (playerId: string, newHC: number) => {
+    setConfig(prev => ({
+      ...prev,
+      players: prev.players.map(p => p.id === playerId ? { ...p, hc: newHC } : p)
+    }));
+  };
+
+  // 3. Admin Logic: Remove Player
+  const removePlayer = (playerId: string) => {
+    setConfig(prev => ({
+      ...prev,
+      players: prev.players.filter(p => p.id !== playerId)
+    }));
+  };
 
   return (
     <TournamentContext.Provider value={{ 
@@ -48,7 +63,9 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
       setConfig, 
       currentUser, 
       allRegisteredPlayers, 
-      joinTournament 
+      joinTournament,
+      updatePlayerHandicap, // Now being passed to the app
+      removePlayer          // Now being passed to the app
     }}>
       {children}
     </TournamentContext.Provider>
@@ -57,6 +74,13 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
 
 export const useTournament = () => {
   const context = useContext(TournamentContext);
-  if (!context) return { config: { players: [] }, currentUser: { role: 'GUEST' } };
+  // Default fallback to prevent "undefined" crashes
+  if (!context) return { 
+    config: { players: [] }, 
+    currentUser: { role: 'GUEST' },
+    joinTournament: () => {},
+    updatePlayerHandicap: () => {},
+    removePlayer: () => {}
+  };
   return context;
 };

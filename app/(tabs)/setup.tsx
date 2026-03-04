@@ -3,19 +3,10 @@ import { Alert, ScrollView, Share, StyleSheet, Text, TextInput, TouchableOpacity
 import { Player, useTournament } from '../../store/TournamentContext';
 
 export default function SetupScreen() {
-  const { config, setConfig, currentUser, allRegisteredPlayers } = useTournament();
+  const { config, setConfig, currentUser, updatePlayerHandicap, removePlayer } = useTournament();
   
-  // Safety check to prevent the "null" error from crashing this screen
-  if (!currentUser) return null;
-
-  const isAdmin = currentUser.role === 'ADMIN';
-
-  const updatePlayer = (id: string, field: string, value: string | number) => {
-    const newPlayers = config.players.map((p: Player) => 
-      p.id === id ? { ...p, [field]: value } : p
-    );
-    setConfig({ ...config, players: newPlayers });
-  };
+  const players = config?.players || [];
+  const isAdmin = currentUser?.role === 'ADMIN';
 
   const handleShareTournament = async () => {
     try {
@@ -28,20 +19,20 @@ export default function SetupScreen() {
   };
 
   const handleOptimizeTournament = () => {
-    // If we have registered players but haven't "started" the roster yet, use those
-    const sourcePool = config.players.length > 0 ? config.players : allRegisteredPlayers;
-
-    if (sourcePool.length < 4) {
+    if (players.length < 4) {
       Alert.alert("Error", "Need at least 4 players to balance groups.");
       return;
     }
 
-    // ABCD / Snake Draft Logic: Pairs 1&16 (Team A) and 8&9 (Team B) 
-    const sorted = [...sourcePool].sort((a, b) => a.hc - b.hc);
+    // ABCD / Snake Draft Logic
+    // Sorts by handicap: 1st (Lowest) to 16th (Highest)
+    const sorted = [...players].sort((a, b) => a.hc - b.hc);
     const numGroups = Math.floor(sorted.length / 4);
     const finalRoster: Player[] = [];
 
     for (let i = 0; i < numGroups; i++) {
+      // The "Snake" Math:
+      // Group 1: Best(1), Worst(16), 8th, and 9th.
       const p1 = sorted[i]; 
       const p2 = sorted[numGroups * 2 - 1 - i]; 
       const p3 = sorted[numGroups * 2 + i]; 
@@ -56,16 +47,22 @@ export default function SetupScreen() {
     }
 
     setConfig({ ...config, players: finalRoster });
-    Alert.alert("Success", `Created ${numGroups} balanced foursomes.`);
+    Alert.alert("Success", `Created ${numGroups} balanced foursomes (Team A vs Team B).`);
   };
 
-  if (!isAdmin) return <View style={styles.centered}><Text>Admin Only</Text></View>;
+  if (!isAdmin) {
+    return (
+      <View style={styles.centered}>
+        <Text>Admin access required to modify tournament settings.</Text>
+      </View>
+    );
+  }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 60 }}>
+    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 100 }}>
       <Text style={styles.header}>Tournament Setup</Text>
 
-      {/* NEW: SHARE LINK SECTION */}
+      {/* SHARE SECTION */}
       <View style={styles.section}>
         <Text style={styles.label}>INVITE PLAYERS</Text>
         <TouchableOpacity style={styles.shareBtn} onPress={handleShareTournament}>
@@ -73,42 +70,53 @@ export default function SetupScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* ROSTER & OPTIMIZATION */}
       <View style={styles.section}>
         <View style={styles.headerRow}>
-          <Text style={styles.label}>ROSTER ({config.players.length} PLAYERS)</Text>
+          <Text style={styles.label}>ROSTER ({players.length}/16 PLAYERS)</Text>
           <TouchableOpacity onPress={handleOptimizeTournament} style={styles.optimizeBtn}>
-            <Text style={styles.optimizeText}>Auto-Balance All</Text>
+            <Text style={styles.optimizeText}>Auto-Balance Teams</Text>
           </TouchableOpacity>
         </View>
 
-        {config.players.length === 0 && (
+        {players.length === 0 && (
           <Text style={styles.emptyNote}>No players registered yet. Share the link above!</Text>
         )}
 
-        {Array.from({ length: Math.ceil(config.players.length / 4) }).map((_, gIdx) => (
-          <View key={gIdx} style={styles.groupCard}>
-            <Text style={styles.groupTitle}>GROUP {gIdx + 1}</Text>
-            {config.players
-              .filter((p: Player) => p.groupId === gIdx)
-              .map((player: Player) => (
-                <View key={player.id} style={styles.playerRow}>
-                  <View style={[styles.teamIndicator, { backgroundColor: player.team === 'A' ? '#1e3a8a' : '#b91c1c' }]} />
-                  <TextInput
-                    style={styles.nameInput}
-                    value={player.name}
-                    onChangeText={(text) => updatePlayer(player.id, 'name', text)}
-                  />
-                  <Text style={styles.hcLabel}>HC</Text>
-                  <TextInput
-                    style={styles.hcInput}
-                    keyboardType="numeric"
-                    value={String(player.hc)}
-                    onChangeText={(text) => updatePlayer(player.id, 'hc', parseFloat(text) || 0)}
-                  />
-                </View>
-              ))}
-          </View>
-        ))}
+        {/* GROUP DISPLAY */}
+        {Array.from({ length: Math.ceil(players.length / 4) }).map((_, gIdx) => {
+          const groupPlayers = players.filter((p: Player) => p.groupId === gIdx);
+          
+          return (
+            <View key={gIdx} style={styles.groupCard}>
+              <Text style={styles.groupTitle}>GROUP {gIdx + 1}</Text>
+              {groupPlayers.length > 0 ? (
+                groupPlayers.map((player: Player) => (
+                  <View key={player.id} style={styles.playerRow}>
+                    <View style={[styles.teamIndicator, { backgroundColor: player.team === 'A' ? '#1e3a8a' : '#b91c1c' }]} />
+                    <Text style={styles.playerName}>{player.name}</Text>
+                    
+                    <View style={styles.hcContainer}>
+                      <Text style={styles.hcLabel}>HC</Text>
+                      <TextInput
+                        style={styles.hcInput}
+                        keyboardType="numeric"
+                        value={String(player.hc)}
+                        onChangeText={(text) => updatePlayerHandicap(player.id, parseFloat(text) || 0)}
+                      />
+                    </View>
+
+                    <TouchableOpacity onPress={() => removePlayer(player.id)} style={styles.removeBtn}>
+                      <Text style={styles.removeText}>×</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))
+              ) : (
+                <Text style={styles.emptyNote}>Wait for "Auto-Balance" to assign groups.</Text>
+              )}
+            </View>
+          );
+        })}
       </View>
     </ScrollView>
   );
@@ -117,20 +125,23 @@ export default function SetupScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, backgroundColor: '#f8f9fa' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
-  header: { fontSize: 28, fontWeight: '800', marginBottom: 25, marginTop: 40, color: '#1a1a1a' },
+  header: { fontSize: 32, fontWeight: '900', marginBottom: 25, marginTop: 40, color: '#1e293b' },
   section: { marginBottom: 30 },
-  label: { fontSize: 12, color: '#888', fontWeight: '700', letterSpacing: 1, marginBottom: 10 },
+  label: { fontSize: 12, color: '#94a3b8', fontWeight: '800', letterSpacing: 1.5, marginBottom: 10 },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  shareBtn: { backgroundColor: '#1e3a8a', padding: 15, borderRadius: 12, alignItems: 'center' },
+  shareBtn: { backgroundColor: '#1e3a8a', padding: 16, borderRadius: 12, alignItems: 'center' },
   shareBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  optimizeBtn: { backgroundColor: '#eef2ff', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#1e3a8a' },
-  optimizeText: { color: '#1e3a8a', fontSize: 12, fontWeight: 'bold' },
-  groupCard: { backgroundColor: '#fff', borderRadius: 12, padding: 12, marginBottom: 15, borderWidth: 1, borderColor: '#e5e7eb' },
-  groupTitle: { fontSize: 12, fontWeight: 'bold', color: '#64748b', marginBottom: 10 },
-  playerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
-  teamIndicator: { width: 5, height: 24, borderRadius: 3, marginRight: 15 },
-  nameInput: { flex: 2, fontSize: 16, fontWeight: '500', color: '#1a1a1a' },
-  hcLabel: { fontSize: 12, color: '#999', marginRight: 8, fontWeight: '600' },
-  hcInput: { borderWidth: 1, borderColor: '#d1d5db', borderRadius: 8, width: 45, height: 30, textAlign: 'center', fontSize: 14, backgroundColor: '#f9fafb' },
-  emptyNote: { textAlign: 'center', color: '#999', marginTop: 20, fontStyle: 'italic' }
+  optimizeBtn: { backgroundColor: '#e0f2fe', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8 },
+  optimizeText: { color: '#0369a1', fontSize: 12, fontWeight: 'bold' },
+  groupCard: { backgroundColor: '#fff', borderRadius: 16, padding: 16, marginBottom: 15, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 10, elevation: 2 },
+  groupTitle: { fontSize: 13, fontWeight: 'bold', color: '#64748b', marginBottom: 12 },
+  playerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  teamIndicator: { width: 6, height: 30, borderRadius: 3, marginRight: 12 },
+  playerName: { flex: 1, fontSize: 16, fontWeight: '600', color: '#1e293b' },
+  hcContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f1f5f9', paddingHorizontal: 8, borderRadius: 6, marginRight: 8 },
+  hcLabel: { fontSize: 10, color: '#94a3b8', fontWeight: 'bold', marginRight: 4 },
+  hcInput: { width: 35, height: 30, textAlign: 'center', fontSize: 14, fontWeight: '700', color: '#1e3a8a' },
+  removeBtn: { padding: 4 },
+  removeText: { color: '#dc2626', fontSize: 20, fontWeight: '300' },
+  emptyNote: { textAlign: 'center', color: '#94a3b8', marginTop: 10, fontStyle: 'italic', fontSize: 13 }
 });

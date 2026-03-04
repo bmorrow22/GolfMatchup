@@ -5,29 +5,24 @@ import { Platform } from 'react-native';
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-// 1. IMPORT TOURNAMENT CONTEXT
 import { useTournament } from '../../store/TournamentContext';
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
-  
-  // 2. GET THE CURRENT USER ROLE
   const { currentUser } = useTournament(); 
 
-  // If context isn't ready, show a loading screen or nothing to prevent "null" errors
-  if (!currentUser) return null;
+  // Use 'PLAYER' or 'GUEST' as a fallback so the app isn't a blank screen
+  const userRole = currentUser?.role || 'PLAYER';
 
   return (
     <Tabs
       screenOptions={{
-        // FIX: Explicitly set the active color to Navy Blue so it doesn't "disappear"
         tabBarActiveTintColor: '#1e3a8a',
         tabBarInactiveTintColor: '#94a3b8',
         headerShown: false,
         tabBarButton: HapticTab,
         tabBarStyle: Platform.select({
           ios: {
-            // Use a static background color to ensure contrast
             backgroundColor: '#ffffff',
             position: 'absolute',
             height: 88,
@@ -48,11 +43,12 @@ export default function TabLayout() {
         }}
       />
       
+      {/* FIX: Ensure name is lowercase to match profile.tsx */}
       <Tabs.Screen
-        name="explore"
+        name="profile"
         options={{
-          title: 'Explore',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="paperplane.fill" color={color} />,
+          title: 'Profile',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="person.circle" color={color} />,
         }}
       />
 
@@ -60,12 +56,12 @@ export default function TabLayout() {
         name="scorecard"
         options={{
           title: 'Scorecard',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="checkmark.circle.fill" color={color} />,
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="list.bullet.rectangle" color={color} />,
         }}
       />
 
-      {/* 4. ONLY SHOW SETUP IF USER IS ADMIN */}
-      {currentUser.role === 'ADMIN' && (
+      {/* Show Setup only for ADMIN */}
+      {userRole === 'ADMIN' && (
         <Tabs.Screen
           name="setup"
           options={{
