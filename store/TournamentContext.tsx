@@ -3,58 +3,99 @@ import React, { createContext, useContext, useState } from 'react';
 export interface Player {
   id: string;
   name: string;
-  email: string;
+  email?: string; // Made optional to support placeholders
   hc: number;
-  role?: 'ADMIN' | 'PLAYER'; // Added role to the Player interface
+  role: 'ADMIN' | 'PLAYER'; 
   team: 'A' | 'B' | 'UNASSIGNED';
-  groupId: number | null;
+  groupId: number | null; // Keep this but allow null
+  isPlaceholder?: boolean; // ADD THIS to fix setup.tsx errors
+}
+
+// FIXED: Added multi-round data structure and scoring logic
+interface RoundConfig {
+  course: string;
+  formats: ('TOTALS' | 'SCRAMBLE' | 'ALT-SHOT' | 'SINGLES')[];
 }
 
 interface TournamentState {
-  ownerId: string;
-  course: 'SOUTH' | 'NORTH';
-  segmentLength: 9 | 18;
-  format: 'TOTALS' | 'SINGLES' | 'SCRAMBLE' | 'ALTSHOT';
+  id: string; 
+  ownerId: string; 
+  rounds: number;
+  roundsData: RoundConfig[];
+  isMatchplay: boolean;
+  pointsPerWin: number;
+  pointsPerRound: number;
   players: Player[]; 
 }
 
 const TournamentContext = createContext<any>(null);
 
 export const TournamentProvider = ({ children }: { children: React.ReactNode }) => {
-  const [config, setConfig] = useState<TournamentState>({
-    ownerId: 'user_123',
-    course: 'SOUTH',
-    segmentLength: 9,
-    format: 'TOTALS',
-    players: [], 
+  const [config, setConfig] = useState<TournamentState | null>(null);
+  const [currentUser, setCurrentUser] = useState<any>({
+    id: 'user_123',
+    name: 'Tournament Admin',
+    role: 'ADMIN'
   });
 
-  const [allRegisteredPlayers, setAllRegisteredPlayers] = useState<Player[]>([]);
-  const [currentUser] = useState({ id: 'user_123', role: 'ADMIN' });
+  // 1. Join Logic - Now handles "Claiming" a placeholder slot
+  const joinByCode = (code: string, userProfile: any) => {
+    if (!config) return;
 
-  // 1. Join Logic
-  const joinTournament = (user: Player) => {
-    setAllRegisteredPlayers(prev => [...prev, user]);
-    setConfig(prev => ({
-      ...prev,
-      players: [...prev.players, { ...user, team: 'UNASSIGNED', groupId: null }]
-    }));
+    // Logic: Look for the first placeholder slot. If found, replace it with the real user.
+    // If no placeholders exist, append the user to the end.
+    const roster = [...config.players];
+    const placeholderIndex = roster.findIndex(p => p.isPlaceholder === true);
+
+    if (placeholderIndex !== -1) {
+      // Claim the existing slot (preserves Team assignment and ID for the bracket)
+      roster[placeholderIndex] = {
+        ...roster[placeholderIndex],
+        ...userProfile,
+        isPlaceholder: false, // Mark as filled
+      };
+    } else {
+      // No slots left, just add them to the list
+      roster.push({
+        ...userProfile,
+        hc: 0,
+        role: 'PLAYER',
+        team: 'UNASSIGNED',
+        groupId: null,
+        isPlaceholder: false
+      });
+    }
+
+    setConfig({ ...config, players: roster });
   };
 
-  // 2. Admin Logic: Update Handicap
+  // 2. Helper to update player team assignments
+  const updatePlayerTeam = (playerId: string, team: 'A' | 'B') => {
+    if (!config) return;
+    setConfig({
+      ...config,
+      players: config.players.map(p => 
+        p.id === playerId ? { ...p, team } : p
+      )
+    });
+  };
+
   const updatePlayerHandicap = (playerId: string, newHC: number) => {
-    setConfig(prev => ({
-      ...prev,
-      players: prev.players.map(p => p.id === playerId ? { ...p, hc: newHC } : p)
-    }));
+    if (!config) return;
+    setConfig({
+      ...config,
+      players: config.players.map(p => 
+        p.id === playerId ? { ...p, hc: newHC } : p
+      )
+    });
   };
 
-  // 3. Admin Logic: Remove Player
   const removePlayer = (playerId: string) => {
-    setConfig(prev => ({
-      ...prev,
-      players: prev.players.filter(p => p.id !== playerId)
-    }));
+    if (!config) return;
+    setConfig({
+      ...config,
+      players: config.players.filter(p => p.id !== playerId)
+    });
   };
 
   return (
@@ -62,10 +103,11 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
       config, 
       setConfig, 
       currentUser, 
-      allRegisteredPlayers, 
-      joinTournament,
-      updatePlayerHandicap, // Now being passed to the app
-      removePlayer          // Now being passed to the app
+      setCurrentUser,
+      joinByCode,
+      updatePlayerHandicap,
+      updatePlayerTeam,
+      removePlayer
     }}>
       {children}
     </TournamentContext.Provider>
@@ -74,13 +116,6 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
 
 export const useTournament = () => {
   const context = useContext(TournamentContext);
-  // Default fallback to prevent "undefined" crashes
-  if (!context) return { 
-    config: { players: [] }, 
-    currentUser: { role: 'GUEST' },
-    joinTournament: () => {},
-    updatePlayerHandicap: () => {},
-    removePlayer: () => {}
-  };
+  if (!context) return { config: null, currentUser: null };
   return context;
 };
