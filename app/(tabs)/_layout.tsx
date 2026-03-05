@@ -4,15 +4,13 @@ import { Platform } from 'react-native';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
-import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useTournament } from '../../store/TournamentContext';
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
-  const { currentUser } = useTournament(); 
+  const { userRole } = useTournament();
 
-  // Use 'PLAYER' or 'GUEST' as a fallback so the app isn't a blank screen
-  const userRole = currentUser?.role || 'PLAYER';
+  // Roles that can access the Setup tab
+  const canAccessSetup = userRole === 'OWNER' || userRole === 'ADMIN';
 
   return (
     <Tabs
@@ -34,7 +32,8 @@ export default function TabLayout() {
             paddingBottom: 10,
           },
         }),
-      }}>
+      }}
+    >
       <Tabs.Screen
         name="index"
         options={{
@@ -42,34 +41,54 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <IconSymbol size={28} name="house.fill" color={color} />,
         }}
       />
-      
-      {/* FIX: Ensure name is lowercase to match profile.tsx */}
-      <Tabs.Screen
-        name="profile"
-        options={{
-          title: 'Profile',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="person.circle" color={color} />,
-        }}
-      />
 
       <Tabs.Screen
         name="scorecard"
         options={{
           title: 'Scorecard',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="list.bullet.rectangle" color={color} />,
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={28} name="list.bullet.rectangle" color={color} />
+          ),
         }}
       />
 
-      {/* Show Setup only for ADMIN */}
-      {userRole === 'ADMIN' && (
-        <Tabs.Screen
-          name="setup"
-          options={{
-            title: 'Setup',
-            tabBarIcon: ({ color }) => <IconSymbol size={28} name="gearshape.fill" color={color} />,
-          }}
-        />
-      )}
+      {/* Leaderboard replaces the Expo explore placeholder */}
+      <Tabs.Screen
+        name="explore"
+        options={{
+          title: 'Leaderboard',
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={28} name="trophy.fill" color={color} />
+          ),
+        }}
+      />
+
+      <Tabs.Screen
+        name="profile"
+        options={{
+          title: 'Profile',
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={28} name="person.circle" color={color} />
+          ),
+        }}
+      />
+
+      {/*
+        FIX: Never conditionally render Tabs.Screen — it causes Expo Router crashes.
+        Instead, use href: null to hide the tab for non-admins while keeping
+        the screen registered in the navigator.
+      */}
+      <Tabs.Screen
+        name="setup"
+        options={{
+          title: 'Setup',
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={28} name="gearshape.fill" color={color} />
+          ),
+          // Hide tab item for non-admins; the screen route still exists
+          href: canAccessSetup ? undefined : null,
+        }}
+      />
     </Tabs>
   );
 }
