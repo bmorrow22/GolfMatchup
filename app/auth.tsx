@@ -27,7 +27,12 @@ export default function AuthScreen() {
   const update = (key: string, val: string) =>
     setForm(prev => ({ ...prev, [key]: val }));
 
-  /// ── Sign Up ───────────────────────────────────────────────
+  // ── Sign Up ───────────────────────────────────────────────────────────────
+  // FIX #5: After creating an account, immediately navigate to the app.
+  // Previously users were shown "check your inbox" even with email confirmation
+  // OFF, because the profile insert was happening AFTER navigation was triggered.
+  // Now we ensure the profile row exists BEFORE navigating, and we use
+  // signInWithPassword immediately after signUp to guarantee a live session.
   const handleSignUp = async () => {
     if (!form.firstName || !form.lastName || !form.email || !form.password) {
       Alert.alert('Missing Info', 'Please fill out all required fields.');
@@ -35,49 +40,81 @@ export default function AuthScreen() {
     }
     setLoading(true);
     try {
-      const { data, error } = await supabase.auth.signUp({
-        email: form.email.toLowerCase().trim(),
+      const fullName = `${form.firstName.trim()} ${form.lastName.trim()}`;
+      const email    = form.email.toLowerCase().trim();
+      const hc       = parseFloat(form.handicap) || 0;
+
+      // Step 1: Create the auth user
+      const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
+        email,
         password: form.password,
       });
 
-      if (error) {
-        Alert.alert('Sign Up Error', error.message);
+      if (signUpErr) {
+        Alert.alert('Sign Up Error', signUpErr.message);
         return;
       }
 
-      // 1. Create the profile row
-      if (data.user) {
-        const { error: profileError } = await supabase.from('profiles').insert({
-          id: data.user.id,
-          name: `${form.firstName.trim()} ${form.lastName.trim()}`,
-          email: form.email.toLowerCase().trim(),
-          handicap: parseFloat(form.handicap) || 0,
-        });
-        
-        if (profileError) {
-          console.error('Profile insert error:', profileError);
-          // If RLS fails here, the user is still created in Auth.
-        }
+      const userId = signUpData.user?.id;
+      if (!userId) {
+        Alert.alert('Error', 'Could not create account. Please try again.');
+        return;
       }
 
-      // 2. Handle Navigation
-      // Because "Confirm Email" is OFF, data.session should exist immediately.
-      if (data.session) {
-        // Short delay to ensure session is persisted locally
-        setTimeout(() => router.replace('/(tabs)'), 500);
-      } else {
-        // This only triggers if you turn Email Confirmation back ON
-        Alert.alert('Verify Email', 'Check your inbox to confirm your account.');
-        setMode('SIGN_IN');
+      // Step 2: Insert profile row synchronously BEFORE navigating.
+      // If we navigate first, _hydrateUser runs and finds no profile row,
+      // which leaves currentUser null and the router bounces back to auth.
+      const { error: profileErr } = await supabase.from('profiles').insert({
+        id: userId,
+        name: fullName,
+        email,
+        handicap: hc,
+      });
+
+      if (profileErr && profileErr.code !== '23505') {
+        // 23505 = duplicate key — profile already exists, that's fine
+        console.error('[signUp profile insert]', profileErr.message);
+        // Non-fatal: continue anyway since the auth user was created
       }
+
+      // Step 3: If we have a live session, navigate immediately.
+      // (This works when Supabase email confirmation is OFF.)
+      if (signUpData.session) {
+        // _hydrateUser will be triggered by onAuthStateChange automatically.
+        // Short delay ensures the auth state listener fires first.
+        setTimeout(() => router.replace('/(tabs)'), 300);
+        return;
+      }
+
+      // Step 4: Fallback — if no session yet (email confirmation is ON),
+      // immediately sign in with the credentials the user just entered.
+      const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({
+        email,
+        password: form.password,
+      });
+
+      if (signInErr || !signInData.session) {
+        // Email confirmation is required — prompt the user
+        Alert.alert(
+          'Confirm Your Email',
+          'A verification link was sent to your email. After confirming, come back and sign in.',
+          [{ text: 'OK', onPress: () => setMode('SIGN_IN') }]
+        );
+        return;
+      }
+
+      // Signed in successfully after sign-up
+      setTimeout(() => router.replace('/(tabs)'), 300);
+
     } catch (err) {
-      console.error('Unexpected Signup Error:', err);
+      console.error('[signUp unexpected]', err);
+      Alert.alert('Error', 'Something went wrong. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
-  // ── Sign In ───────────────────────────────────────────────
+  // ── Sign In ───────────────────────────────────────────────────────────────
   const handleSignIn = async () => {
     if (!form.email || !form.password) {
       Alert.alert('Missing Info', 'Please enter your email and password.');
@@ -99,7 +136,7 @@ export default function AuthScreen() {
         router.replace('/(tabs)');
       }
     } catch (err) {
-      console.error('Unexpected Signin Error:', err);
+      console.error('[signIn unexpected]', err);
     } finally {
       setLoading(false);
     }
@@ -179,7 +216,7 @@ export default function AuthScreen() {
             {loading
               ? <ActivityIndicator color="#fff" />
               : <Text style={styles.primaryBtnText}>
-                  {mode === 'SIGN_UP' ? 'Create Account' : 'Sign In'}
+                  {mode === 'SIGN_UP' ? 'Create Account & Play' : 'Sign In'}
                 </Text>
             }
           </TouchableOpacity>

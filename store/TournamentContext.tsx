@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 
@@ -8,8 +9,8 @@ export type TeamId     = 'A' | 'B' | 'C' | 'D' | 'UNASSIGNED';
 export type FormatType = 'TOTALS' | 'SCRAMBLE' | 'ALT-SHOT' | 'SINGLES';
 
 export interface Player {
-  id: string;           // Real UUID from tournament_players table
-  userId?: string;      // UUID from auth.users — undefined for placeholders
+  id: string;
+  userId?: string;
   name: string;
   email?: string;
   hc: number;
@@ -22,13 +23,13 @@ export interface Player {
 export interface Pairing {
   id: string;
   roundIndex: number;
-  segmentIndex: number;   
-  teamAPlayers: string[]; 
+  segmentIndex: number;
+  teamAPlayers: string[];
   teamBPlayers: string[];
 }
 
 export interface CurrentUser {
-  id: string;       
+  id: string;
   name: string;
   email: string;
   hc: number;
@@ -59,6 +60,8 @@ export interface TournamentConfig {
 
 export type ScoreMap = Record<number, Record<number, Record<string, string>>>;
 
+const LAST_TOURNAMENT_KEY = 'golf_last_tournament_id';
+
 // ─── Context interface ────────────────────────────────────────────────────────
 
 interface TournamentContextType {
@@ -83,8 +86,6 @@ interface TournamentContextType {
   syncScoresToSupabase: (roundIndex: number) => Promise<void>;
 }
 
-// ─── Context ──────────────────────────────────────────────────────────────────
-
 const TournamentContext = createContext<TournamentContextType | null>(null);
 
 export const TournamentProvider = ({ children }: { children: React.ReactNode }) => {
@@ -92,8 +93,13 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [scores, setScores] = useState<ScoreMap>({});
 
-  const configRef = useRef<TournamentConfig | null>(null);
+  const configRef      = useRef<TournamentConfig | null>(null);
+  const currentUserRef = useRef<CurrentUser | null>(null);
+  const scoresRef      = useRef<ScoreMap>({});
+
   useEffect(() => { configRef.current = config; }, [config]);
+  useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
+  useEffect(() => { scoresRef.current = scores; }, [scores]);
 
   // ── Derived values ──────────────────────────────────────────────────────────
 
@@ -113,33 +119,76 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) _hydrateUser(session.user);
     });
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) _hydrateUser(session.user);
-      else setCurrentUser(null);
+      if (session?.user) {
+        _hydrateUser(session.user);
+      } else {
+        // Signed out — clear everything
+        setCurrentUser(null);
+        _setConfig(null);
+        setScores({});
+      }
     });
     return () => subscription.unsubscribe();
   }, []);
 
   const _hydrateUser = async (authUser: any) => {
-    // FIX: Using maybeSingle() to handle brand new users who don't have a profile row yet
     const { data, error } = await supabase
       .from('profiles')
       .select('*')
       .eq('id', authUser.id)
-      .maybeSingle(); 
-    
+      .maybeSingle();
+
     if (error) { console.error('[hydrate] profile error:', error.message); return; }
-    
+
     if (data) {
-      setCurrentUser({
+      const user: CurrentUser = {
         id: data.id,
         name: data.name,
         email: data.email,
         hc: data.handicap ?? 0,
         role: 'PLAYER',
-      });
+      };
+      setCurrentUser(user);
+      // FIX #4: Auto-reload last tournament after sign-in/app restart
+      await _reloadLastTournament(user);
     } else {
-      console.warn("User has no profile row. Sign-up flow should insert into profiles table.");
+      console.warn('[hydrate] No profile row found for:', authUser.id);
+    }
+  };
+
+  // FIX #4: Persist & restore the last active tournament so owners don't have
+  // to re-enter the invite code after signing out and back in.
+  const _reloadLastTournament = async (user: CurrentUser) => {
+    if (configRef.current) return; // already loaded
+    try {
+      const lastId = await AsyncStorage.getItem(LAST_TOURNAMENT_KEY);
+      if (!lastId) return;
+
+      const { data } = await supabase
+        .from('tournaments')
+        .select('*, tournament_players(*), pairings(*)')
+        .eq('id', lastId)
+        .single();
+
+      if (!data) {
+        await AsyncStorage.removeItem(LAST_TOURNAMENT_KEY);
+        return;
+      }
+
+      // Confirm user is still a participant
+      const isParticipant =
+        data.owner_id === user.id ||
+        (data.tournament_players ?? []).some((p: any) => p.user_id === user.id);
+
+      if (!isParticipant) return;
+
+      const cfg = _mapTournament(data);
+      _setConfig(cfg);
+      await _loadScores(cfg);
+    } catch (err) {
+      console.warn('[reloadLastTournament]', err);
     }
   };
 
@@ -166,9 +215,7 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'tournament_players',
         filter: `tournament_id=eq.${config.id}`,
-      }, () => {
-        refreshTournament();
-      })
+      }, () => { refreshTournament(); })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [config?.id]);
@@ -196,14 +243,13 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
       status: 'SETUP',
     });
 
-    if (tErr) return null;
+    if (tErr) { console.error('[createTournament]', tErr.message); return null; }
 
-    // FIX: Insert owner and immediately SELECT back to get the database's UUID
     const { data: playerRow, error: pErr } = await supabase
       .from('tournament_players')
       .insert({
         tournament_id: code,
-        user_id: currentUser.id,        
+        user_id: currentUser.id,
         display_name: currentUser.name,
         handicap: currentUser.hc,
         team: 'UNASSIGNED',
@@ -214,7 +260,7 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
       .select()
       .single();
 
-    if (pErr) return null;
+    if (pErr) { console.error('[createTournament player]', pErr.message); return null; }
 
     const newConfig: TournamentConfig = {
       id: code,
@@ -229,8 +275,8 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
       pointsPerSegment: 2,
       pointsPerSegmentPush: 1,
       players: [{
-        id: playerRow.id,         // Real DB UUID
-        userId: currentUser.id,   
+        id: playerRow.id,
+        userId: currentUser.id,
         name: currentUser.name,
         email: currentUser.email,
         hc: currentUser.hc,
@@ -244,6 +290,8 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
     };
 
     _setConfig(newConfig);
+    // FIX #4: Persist so we can reload on next sign-in
+    await AsyncStorage.setItem(LAST_TOURNAMENT_KEY, code);
     return newConfig;
   };
 
@@ -256,7 +304,6 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
     const tCount = Math.min(Math.max(teamCount, 1), 4);
     const pCount = Math.max(playersPerTeam, 1);
     const teamLabels = (['A', 'B', 'C', 'D'] as TeamId[]).slice(0, tCount);
-
     const realPlayers = cfg.players.filter(p => !p.isPlaceholder);
 
     const rowsToInsert: any[] = [];
@@ -279,16 +326,15 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
 
     if (rowsToInsert.length === 0) return;
 
-    // FIX: Insert and select back real UUIDs for placeholders
     const { data: inserted, error } = await supabase
       .from('tournament_players')
       .insert(rowsToInsert)
       .select();
 
-    if (error) return;
+    if (error) { console.error('[addPlaceholders]', error.message); return; }
 
     const newPlayers: Player[] = (inserted ?? []).map((row: any): Player => ({
-      id: row.id,             
+      id: row.id,
       userId: undefined,
       name: row.display_name,
       hc: 0,
@@ -352,6 +398,8 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
     const cfg = _mapTournament(refreshed ?? tournament);
     _setConfig(cfg);
     await _loadScores(cfg);
+    // FIX #4: Persist for re-login
+    await AsyncStorage.setItem(LAST_TOURNAMENT_KEY, code.toUpperCase());
     return { success: true };
   };
 
@@ -399,8 +447,8 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
     pointsPerSegmentPush: data.points_per_segment_push,
     status: data.status,
     players: (data.tournament_players ?? []).map((p: any): Player => ({
-      id: p.id,                        
-      userId: p.user_id ?? undefined,  
+      id: p.id,
+      userId: p.user_id ?? undefined,
       name: p.display_name,
       hc: p.handicap ?? 0,
       role: (p.role ?? 'PLAYER') as UserRole,
@@ -468,31 +516,60 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
     supabase.from('tournament_players').delete().eq('id', playerId).then(() => {});
   };
 
+  // FIX #1: Do NOT include `id` in the pairings insert.
+  // Previously "auto-0-0" / "manual-123" string IDs were sent to a UUID column,
+  // silently failing. Now we omit `id` and let Supabase auto-generate real UUIDs,
+  // then read them back from the insert response to keep local state in sync.
   const savePairings = async (pairings: Pairing[]) => {
     const cfg = configRef.current;
     if (!cfg) return;
 
-    // FIX: Guard against any lingering local- IDs before inserting into DB
     const valid = pairings.filter(p =>
+      p.teamAPlayers.length > 0 &&
+      p.teamBPlayers.length > 0 &&
       p.teamAPlayers.every(id => !id.startsWith('local-')) &&
       p.teamBPlayers.every(id => !id.startsWith('local-'))
     );
 
-    _setConfig({ ...cfg, pairings: valid });
+    // Delete all existing first
+    const { error: delErr } = await supabase
+      .from('pairings')
+      .delete()
+      .eq('tournament_id', cfg.id);
 
-    await supabase.from('pairings').delete().eq('tournament_id', cfg.id);
+    if (delErr) { console.error('[savePairings delete]', delErr.message); return; }
 
-    if (valid.length === 0) return;
+    if (valid.length === 0) {
+      _setConfig({ ...cfg, pairings: [] });
+      return;
+    }
 
-    await supabase.from('pairings').insert(
-      valid.map(p => ({
-        tournament_id: cfg.id,
-        round_index: p.roundIndex,
-        segment_index: p.segmentIndex,
-        team_a_players: p.teamAPlayers,
-        team_b_players: p.teamBPlayers,
-      }))
-    );
+    const { data: inserted, error: insErr } = await supabase
+      .from('pairings')
+      .insert(
+        valid.map(p => ({
+          tournament_id: cfg.id,
+          round_index: p.roundIndex,
+          segment_index: p.segmentIndex,
+          team_a_players: p.teamAPlayers,
+          team_b_players: p.teamBPlayers,
+          // ← no `id` field: Supabase generates a real UUID automatically
+        }))
+      )
+      .select(); // get back the generated IDs
+
+    if (insErr) { console.error('[savePairings insert]', insErr.message); return; }
+
+    // Update local config with the real DB-generated UUIDs
+    const saved: Pairing[] = (inserted ?? []).map((p: any) => ({
+      id: p.id,
+      roundIndex: p.round_index,
+      segmentIndex: p.segment_index,
+      teamAPlayers: p.team_a_players ?? [],
+      teamBPlayers: p.team_b_players ?? [],
+    }));
+
+    _setConfig({ ...cfg, pairings: saved });
   };
 
   const updateScore = (roundIndex: number, holeIndex: number, playerId: string, value: string) => {
@@ -505,17 +582,26 @@ export const TournamentProvider = ({ children }: { children: React.ReactNode }) 
     });
   };
 
+  // FIX #6: Owner writes scores for ALL players in the tournament.
+  // Other roles only write their own. Uses scoresRef so the latest scores
+  // are always available in the async callback without stale closure issues.
   const syncScoresToSupabase = async (roundIndex: number) => {
     const cfg = configRef.current;
-    const player = cfg?.players.find(p => p.userId === currentUser?.id);
-    if (!cfg || !player) return;
+    const user = currentUserRef.current;
+    if (!cfg || !user) return;
 
-    const roundScores = scores[roundIndex] ?? {};
+    const isOwner = cfg.ownerId === user.id;
+    const myPlayerRow = cfg.players.find(p => p.userId === user.id);
+    if (!myPlayerRow && !isOwner) return;
+
+    const roundScores = scoresRef.current[roundIndex] ?? {};
     const upserts: any[] = [];
 
     Object.entries(roundScores).forEach(([holeIdx, players]) => {
       Object.entries(players).forEach(([pid, val]) => {
-        if (pid !== player.id) return; 
+        // Owner writes all; others write only their own player row
+        const canWrite = isOwner || pid === myPlayerRow?.id;
+        if (!canWrite) return;
         const gross = parseInt(val);
         if (!isNaN(gross) && gross > 0) {
           upserts.push({

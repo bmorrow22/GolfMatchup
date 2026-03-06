@@ -1,5 +1,13 @@
-import React, { useMemo, useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Animated,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { COURSES } from '../../constants/TorreyData';
 import { useTournament } from '../../store/TournamentContext';
 import { calculateNet, getSegmentResult } from '../../utils/golfLogic';
@@ -10,10 +18,157 @@ const TEAM_COLORS: Record<string, string> = {
 
 type LeaderboardTab = 'STANDINGS' | 'SEGMENTS' | 'PAIRINGS' | 'ROSTER';
 
+// ── Animated Standing Row ────────────────────────────────────────────────────
+
+interface StandingEntry {
+  teamId: string;
+  totalPoints: number;
+  segBreakdown: { label: string; result: string; pts: number }[];
+  playerNames: string;
+  holesPlayed: number;
+  recentResults: string[]; // last 3 hole results for streak detection
+}
+
+function FireBadge() {
+  const flicker = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(flicker, { toValue: 0.6, duration: 400, useNativeDriver: true }),
+        Animated.timing(flicker, { toValue: 1,   duration: 400, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+  return (
+    <Animated.Text style={{ fontSize: 18, opacity: flicker }}>🔥</Animated.Text>
+  );
+}
+
+function IceBadge() {
+  return <Text style={{ fontSize: 18 }}>🥶</Text>;
+}
+
+interface StandingRowProps {
+  entry: StandingEntry;
+  rank: number;
+  prevRank: number | null;
+  isNew: boolean;
+}
+
+function StandingRow({ entry, rank, prevRank, isNew }: StandingRowProps) {
+  const slideAnim = useRef(new Animated.Value(isNew ? 60 : 0)).current;
+  const fadeAnim  = useRef(new Animated.Value(isNew ? 0 : 1)).current;
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const bgAnim    = useRef(new Animated.Value(0)).current;
+  const prevRankRef = useRef(prevRank);
+
+  // Animate in on first mount
+  useEffect(() => {
+    if (isNew) {
+      Animated.parallel([
+        Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, tension: 80, friction: 10 }),
+        Animated.timing(fadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+      ]).start();
+    }
+  }, []);
+
+  // Animate position change
+  useEffect(() => {
+    if (prevRankRef.current !== null && prevRankRef.current !== rank) {
+      const movedUp = rank < (prevRankRef.current ?? rank);
+      // Flash green/red background
+      bgAnim.setValue(1);
+      Animated.timing(bgAnim, { toValue: 0, duration: 1200, useNativeDriver: false }).start();
+      // Bounce scale
+      Animated.sequence([
+        Animated.timing(scaleAnim, { toValue: movedUp ? 1.04 : 0.97, duration: 180, useNativeDriver: true }),
+        Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true }),
+      ]).start();
+    }
+    prevRankRef.current = rank;
+  }, [rank]);
+
+  const rankMoved = prevRank !== null && prevRank !== rank;
+  const movedUp   = rankMoved && rank < (prevRank ?? rank);
+  const movedDown = rankMoved && rank > (prevRank ?? rank);
+
+  // Hot streak: last 3 segments all wins
+  const onFire = entry.recentResults.length >= 3 &&
+    entry.recentResults.slice(-3).every(r => r === 'WIN');
+
+  // Cold streak: last 3 segments all losses
+  const iceCold = entry.recentResults.length >= 3 &&
+    entry.recentResults.slice(-3).every(r => r === 'LOSS');
+
+  const flashBg = bgAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['rgba(255,255,255,0)', movedUp ? 'rgba(22,163,74,0.12)' : 'rgba(220,38,38,0.08)'],
+  });
+
+  const teamColor = TEAM_COLORS[entry.teamId] ?? '#64748b';
+
+  return (
+    <Animated.View style={[
+      styles.standingCard,
+      { borderLeftColor: teamColor },
+      { transform: [{ translateY: slideAnim }, { scale: scaleAnim }], opacity: fadeAnim },
+    ]}>
+      <Animated.View style={[StyleSheet.absoluteFillObject, { backgroundColor: flashBg, borderRadius: 14 }]} />
+
+      {/* Rank */}
+      <View style={styles.rankBox}>
+        <Text style={styles.rankNum}>#{rank}</Text>
+        {rankMoved && (
+          <Text style={[styles.rankChange, movedUp ? styles.rankUp : styles.rankDown]}>
+            {movedUp ? '▲' : '▼'}
+          </Text>
+        )}
+      </View>
+
+      {/* Team info */}
+      <View style={{ flex: 1 }}>
+        <View style={styles.teamNameRow}>
+          <Text style={[styles.teamName, { color: teamColor }]}>Team {entry.teamId}</Text>
+          {onFire  && <FireBadge />}
+          {iceCold && <IceBadge />}
+        </View>
+        <Text style={styles.teamPlayers} numberOfLines={1}>{entry.playerNames}</Text>
+        <View style={styles.segDotsRow}>
+          {entry.segBreakdown.map((seg, i) => (
+            <View key={i} style={[
+              styles.segDot,
+              seg.result === 'WIN'  && styles.segDotWin,
+              seg.result === 'LOSS' && styles.segDotLoss,
+              seg.result === 'TIE'  && styles.segDotTie,
+            ]}>
+              <Text style={styles.segDotText}>{seg.label.split(' ')[1]}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+
+      {/* Points */}
+      <View style={styles.ptsBox}>
+        <Text style={styles.ptsNum}>{entry.totalPoints}</Text>
+        <Text style={styles.ptsLabel}>PTS</Text>
+        {entry.holesPlayed > 0 && (
+          <Text style={styles.thruLabel}>THRU {entry.holesPlayed}</Text>
+        )}
+      </View>
+    </Animated.View>
+  );
+}
+
+// ── Main Screen ───────────────────────────────────────────────────────────────
+
 export default function LeaderboardScreen() {
   const { config, scores, refreshTournament } = useTournament();
   const [activeTab, setActiveTab] = useState<LeaderboardTab>('STANDINGS');
   const [refreshing, setRefreshing] = useState(false);
+
+  // Track previous ranks for animation
+  const prevRanksRef = useRef<Record<string, number>>({});
+  const isFirstRender = useRef(true);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -21,75 +176,112 @@ export default function LeaderboardScreen() {
     setRefreshing(false);
   };
 
-  // ── Compute live standings from scores in context ───────────────────────────
-  const standings = useMemo(() => {
-    if (!config || !config.pairings.length) return [];
+  // ── Compute standings ───────────────────────────────────────────────────────
+
+  const standings: StandingEntry[] = useMemo(() => {
+    if (!config) return [];
 
     const teamIds = ['A', 'B', 'C', 'D'].filter(t =>
       config.players.some(p => p.team === t && !p.isPlaceholder)
     );
 
+    // FIX #2: Show standings even without pairings — use team assignments directly.
+    // Previously standings returned [] when pairings.length === 0. Now we either
+    // use pairings if available, or fall back to team-vs-team scoring.
+    const hasPairings = config.pairings.length > 0;
+
     return teamIds.map(teamId => {
       let totalPoints = 0;
+      let holesPlayed = 0;
       const segBreakdown: { label: string; result: string; pts: number }[] = [];
+      const recentResults: string[] = [];
 
       for (let r = 0; r < config.rounds; r++) {
         for (let s = 0; s < 2; s++) {
-          const pairing = config.pairings.find(
-            p => p.roundIndex === r && p.segmentIndex === s
-          );
-          if (!pairing) continue;
-
-          const course = COURSES[config.roundsData?.[r]?.course ?? 'SOUTH'] ?? COURSES.SOUTH;
-          const holes = s === 0 ? course.front9 : course.back9;
+          const course    = COURSES[config.roundsData?.[r]?.course ?? 'SOUTH'] ?? COURSES.SOUTH;
+          const holes     = s === 0 ? course.front9 : course.back9;
           const segOffset = s === 0 ? 0 : 9;
 
-          const teamAPlayers = config.players.filter(p => pairing.teamAPlayers.includes(p.id));
-          const teamBPlayers = config.players.filter(p => pairing.teamBPlayers.includes(p.id));
+          let teamAPlayers, teamBPlayers, myTeamIsA, myTeamIsB;
 
-          const myTeamIsA = teamAPlayers.some(p => p.team === teamId);
-          const myTeamIsB = teamBPlayers.some(p => p.team === teamId);
+          if (hasPairings) {
+            const pairing = config.pairings.find(p => p.roundIndex === r && p.segmentIndex === s);
+            if (!pairing) continue;
+            teamAPlayers = config.players.filter(p => pairing.teamAPlayers.includes(p.id));
+            teamBPlayers = config.players.filter(p => pairing.teamBPlayers.includes(p.id));
+            myTeamIsA = teamAPlayers.some(p => p.team === teamId);
+            myTeamIsB = teamBPlayers.some(p => p.team === teamId);
+          } else {
+            // No pairings — Team A vs Team B directly
+            teamAPlayers = config.players.filter(p => p.team === 'A' && !p.isPlaceholder);
+            teamBPlayers = config.players.filter(p => p.team === 'B' && !p.isPlaceholder);
+            myTeamIsA = teamId === 'A';
+            myTeamIsB = teamId === 'B';
+          }
+
           if (!myTeamIsA && !myTeamIsB) continue;
 
-          // Score each hole
-          const holeResults: ('WIN' | 'LOSS' | 'PUSH')[] = holes.map((hole, i) => {
+          const holeResults = holes.map((hole, i) => {
             const aNet = teamAPlayers.reduce((min, p) => {
               const g = parseInt(scores?.[r]?.[segOffset + i]?.[p.id] ?? '') || 0;
               if (!g) return min;
-              const net = calculateNet(g, p.hc, hole.si);
-              return Math.min(min, net);
+              return Math.min(min, calculateNet(g, p.hc, hole.si));
             }, 99);
             const bNet = teamBPlayers.reduce((min, p) => {
               const g = parseInt(scores?.[r]?.[segOffset + i]?.[p.id] ?? '') || 0;
               if (!g) return min;
-              const net = calculateNet(g, p.hc, hole.si);
-              return Math.min(min, net);
+              return Math.min(min, calculateNet(g, p.hc, hole.si));
             }, 99);
-            if (aNet === 99 || bNet === 99) return 'PUSH';
-            if (aNet < bNet) return 'WIN';
-            if (aNet > bNet) return 'LOSS';
-            return 'PUSH';
+            if (aNet === 99 || bNet === 99) return 'PUSH' as const;
+            if (aNet < bNet) return 'WIN' as const;
+            if (aNet > bNet) return 'LOSS' as const;
+            return 'PUSH' as const;
           });
 
-          const seg = getSegmentResult(
-            holeResults,
-            config.pointsPerSegment,
-            config.pointsPerSegmentPush
-          );
+          // Count holes actually played (non-push due to no scores)
+          const played = holeResults.filter((_, i) => {
+            const aHasScore = teamAPlayers.some(p => parseInt(scores?.[r]?.[segOffset + i]?.[p.id] ?? '') > 0);
+            const bHasScore = teamBPlayers.some(p => parseInt(scores?.[r]?.[segOffset + i]?.[p.id] ?? '') > 0);
+            return aHasScore && bHasScore;
+          }).length;
+          holesPlayed += played;
 
+          const seg = getSegmentResult(holeResults, config.pointsPerSegment, config.pointsPerSegmentPush);
           const myPts = myTeamIsA ? seg.teamAPoints : seg.teamBPoints;
           totalPoints += myPts;
+
+          const resultLabel =
+            seg.winner === 'PUSH' ? 'TIE' :
+            (myTeamIsA ? seg.winner === 'TEAM_A' : seg.winner === 'TEAM_B') ? 'WIN' : 'LOSS';
+
           segBreakdown.push({
             label: `R${r + 1} ${s === 0 ? 'Front' : 'Back'}`,
-            result: seg.winner === 'PUSH' ? 'TIE' : (myTeamIsA ? seg.winner === 'TEAM_A' : seg.winner === 'TEAM_B') ? 'WIN' : 'LOSS',
+            result: resultLabel,
             pts: myPts,
           });
+          recentResults.push(resultLabel);
         }
       }
 
-      return { teamId, totalPoints, segBreakdown };
+      const playerNames = config.players
+        .filter(p => p.team === teamId && !p.isPlaceholder)
+        .map(p => p.name.split(' ')[0])
+        .join(' · ');
+
+      return { teamId, totalPoints, segBreakdown, playerNames, holesPlayed, recentResults };
     }).sort((a, b) => b.totalPoints - a.totalPoints);
   }, [config, scores]);
+
+  // Capture previous ranks on each render
+  const prevRanks = useRef<Record<string, number>>({});
+  const currentRanks: Record<string, number> = {};
+  standings.forEach((s, i) => { currentRanks[s.teamId] = i + 1; });
+
+  const ranksBefore = { ...prevRanks.current };
+  useEffect(() => {
+    prevRanks.current = { ...currentRanks };
+    isFirstRender.current = false;
+  });
 
   if (!config) {
     return (
@@ -101,11 +293,17 @@ export default function LeaderboardScreen() {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#f8f9fa' }}>
-      {/* Header */}
+    <View style={{ flex: 1, backgroundColor: '#0f172a' }}>
+      {/* PGA-style dark header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Leaderboard</Text>
-        <Text style={styles.headerSub}>{config.id} · {config.rounds} Round{config.rounds > 1 ? 's' : ''}</Text>
+        <View>
+          <Text style={styles.headerTitle}>⛳ Leaderboard</Text>
+          <Text style={styles.headerSub}>{config.name ?? config.id} · {config.rounds} Round{config.rounds > 1 ? 's' : ''}</Text>
+        </View>
+        <View style={styles.liveChip}>
+          <View style={styles.liveDot} />
+          <Text style={styles.liveText}>LIVE</Text>
+        </View>
       </View>
 
       {/* Tabs */}
@@ -124,33 +322,42 @@ export default function LeaderboardScreen() {
       </View>
 
       <ScrollView
+        style={{ backgroundColor: '#f8f9fa' }}
         contentContainerStyle={styles.content}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1e3a8a" />}
       >
         {/* ── STANDINGS ── */}
         {activeTab === 'STANDINGS' && (
           <View>
+            {/* Column headers (PGA style) */}
+            <View style={styles.colHeader}>
+              <Text style={[styles.colHeaderText, { width: 40 }]}>POS</Text>
+              <Text style={[styles.colHeaderText, { flex: 1 }]}>TEAM</Text>
+              <Text style={[styles.colHeaderText, { width: 52, textAlign: 'right' }]}>THRU</Text>
+              <Text style={[styles.colHeaderText, { width: 52, textAlign: 'right' }]}>PTS</Text>
+            </View>
+
             {standings.length === 0 ? (
-              <EmptyCard text="No pairings yet. Set up pairings in Setup → Pairings tab to see live scores here." />
+              <EmptyCard text="Scores will appear here once players start entering them." />
             ) : (
-              standings.map((team, i) => (
-                <View key={team.teamId} style={[styles.standingCard, { borderLeftColor: TEAM_COLORS[team.teamId] }]}>
-                  <View style={styles.standingRank}>
-                    <Text style={styles.rankNum}>#{i + 1}</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.teamName, { color: TEAM_COLORS[team.teamId] }]}>Team {team.teamId}</Text>
-                    <Text style={styles.teamPlayers}>
-                      {config.players.filter(p => p.team === team.teamId && !p.isPlaceholder).map(p => p.name).join(' · ')}
-                    </Text>
-                  </View>
-                  <View style={styles.ptsBox}>
-                    <Text style={styles.ptsNum}>{team.totalPoints}</Text>
-                    <Text style={styles.ptsLabel}>pts</Text>
-                  </View>
-                </View>
+              standings.map((entry, i) => (
+                <StandingRow
+                  key={entry.teamId}
+                  entry={entry}
+                  rank={i + 1}
+                  prevRank={isFirstRender.current ? null : (ranksBefore[entry.teamId] ?? null)}
+                  isNew={isFirstRender.current}
+                />
               ))
             )}
+
+            {/* Legend */}
+            <View style={styles.legend}>
+              <LegendItem color="#16a34a" label="Win" />
+              <LegendItem color="#94a3b8" label="Tie" />
+              <LegendItem color="#dc2626" label="Loss" />
+              <Text style={styles.legendFire}>🔥 = 3-seg streak  🥶 = 3-seg cold</Text>
+            </View>
           </View>
         )}
 
@@ -159,11 +366,13 @@ export default function LeaderboardScreen() {
           <View>
             {Array.from({ length: config.rounds }).map((_, r) => (
               <View key={r} style={styles.roundCard}>
-                <Text style={styles.roundTitle}>Round {r + 1} · {config.roundsData?.[r]?.course ?? '—'}</Text>
+                <Text style={styles.roundTitle}>
+                  Round {r + 1} · {config.roundsData?.[r]?.course ?? '—'}
+                </Text>
                 {[0, 1].map(s => {
-                  const fmt = config.roundsData?.[r]?.formats?.[s] ?? '—';
+                  const fmt     = config.roundsData?.[r]?.formats?.[s] ?? '—';
+                  const label   = s === 0 ? 'Front 9' : 'Back 9';
                   const pairing = config.pairings.find(p => p.roundIndex === r && p.segmentIndex === s);
-                  const label = s === 0 ? 'Front 9' : 'Back 9';
 
                   if (!pairing) {
                     return (
@@ -172,58 +381,67 @@ export default function LeaderboardScreen() {
                           <Text style={styles.segSide}>{label}</Text>
                           <Text style={styles.segFmt}>{fmt}</Text>
                         </View>
-                        <Text style={styles.segPending}>No pairing</Text>
+                        <Text style={styles.segPending}>No pairing set</Text>
                       </View>
                     );
                   }
 
                   const teamAPlayers = config.players.filter(p => pairing.teamAPlayers.includes(p.id));
                   const teamBPlayers = config.players.filter(p => pairing.teamBPlayers.includes(p.id));
-                  const teamAName = teamAPlayers[0]?.team ? `Team ${teamAPlayers[0].team}` : 'Team A';
-                  const teamBName = teamBPlayers[0]?.team ? `Team ${teamBPlayers[0].team}` : 'Team B';
+                  const course  = COURSES[config.roundsData?.[r]?.course ?? 'SOUTH'] ?? COURSES.SOUTH;
+                  const holes   = s === 0 ? course.front9 : course.back9;
+                  const offset  = s === 0 ? 0 : 9;
 
-                  const course = COURSES[config.roundsData?.[r]?.course ?? 'SOUTH'] ?? COURSES.SOUTH;
-                  const holes = s === 0 ? course.front9 : course.back9;
-                  const segOffset = s === 0 ? 0 : 9;
-
-                  const aWins = holes.filter((hole, i) => {
+                  let aWins = 0, bWins = 0;
+                  holes.forEach((hole, i) => {
                     const aNet = teamAPlayers.reduce((mn, p) => {
-                      const g = parseInt(scores?.[r]?.[segOffset + i]?.[p.id] ?? '') || 0;
+                      const g = parseInt(scores?.[r]?.[offset + i]?.[p.id] ?? '') || 0;
                       return g ? Math.min(mn, calculateNet(g, p.hc, hole.si)) : mn;
                     }, 99);
                     const bNet = teamBPlayers.reduce((mn, p) => {
-                      const g = parseInt(scores?.[r]?.[segOffset + i]?.[p.id] ?? '') || 0;
+                      const g = parseInt(scores?.[r]?.[offset + i]?.[p.id] ?? '') || 0;
                       return g ? Math.min(mn, calculateNet(g, p.hc, hole.si)) : mn;
                     }, 99);
-                    return aNet !== 99 && bNet !== 99 && aNet < bNet;
-                  }).length;
-                  const bWins = holes.filter((hole, i) => {
-                    const aNet = teamAPlayers.reduce((mn, p) => {
-                      const g = parseInt(scores?.[r]?.[segOffset + i]?.[p.id] ?? '') || 0;
-                      return g ? Math.min(mn, calculateNet(g, p.hc, hole.si)) : mn;
-                    }, 99);
-                    const bNet = teamBPlayers.reduce((mn, p) => {
-                      const g = parseInt(scores?.[r]?.[segOffset + i]?.[p.id] ?? '') || 0;
-                      return g ? Math.min(mn, calculateNet(g, p.hc, hole.si)) : mn;
-                    }, 99);
-                    return aNet !== 99 && bNet !== 99 && bNet < aNet;
-                  }).length;
+                    if (aNet !== 99 && bNet !== 99) {
+                      if (aNet < bNet) aWins++;
+                      else if (bNet < aNet) bWins++;
+                    }
+                  });
 
-                  const result = aWins > bWins ? `${teamAName} leads ${aWins - bWins} up`
-                    : bWins > aWins ? `${teamBName} leads ${bWins - aWins} up`
+                  const teamAName = teamAPlayers[0]?.team ? `Team ${teamAPlayers[0].team}` : 'A';
+                  const teamBName = teamBPlayers[0]?.team ? `Team ${teamBPlayers[0].team}` : 'B';
+                  const result = aWins > bWins
+                    ? `${teamAName} leads ${aWins - bWins} up`
+                    : bWins > aWins
+                    ? `${teamBName} leads ${bWins - aWins} up`
+                    : aWins === 0 && bWins === 0 ? 'Not started'
                     : 'All Square';
+
+                  const totalHoles = aWins + bWins;
+                  const remaining  = 9 - totalHoles;
 
                   return (
                     <View key={s} style={styles.segRow}>
-                      <View>
+                      <View style={{ flex: 1 }}>
                         <Text style={styles.segSide}>{label}</Text>
                         <Text style={styles.segFmt}>{fmt}</Text>
+                        <Text style={styles.segMatchup} numberOfLines={1}>
+                          {teamAPlayers.map(p => p.name.split(' ')[0]).join('/')} vs{' '}
+                          {teamBPlayers.map(p => p.name.split(' ')[0]).join('/')}
+                        </Text>
                       </View>
                       <View style={styles.segRight}>
-                        <Text style={styles.segResult}>{result}</Text>
-                        <Text style={styles.segMatchup}>
-                          {teamAPlayers.map(p => p.name).join('/')} vs {teamBPlayers.map(p => p.name).join('/')}
-                        </Text>
+                        <Text style={[
+                          styles.segResult,
+                          aWins > bWins ? { color: TEAM_COLORS[teamAPlayers[0]?.team ?? 'A'] } :
+                          bWins > aWins ? { color: TEAM_COLORS[teamBPlayers[0]?.team ?? 'B'] } :
+                          { color: '#64748b' }
+                        ]}>{result}</Text>
+                        {totalHoles > 0 && (
+                          <Text style={styles.thruSmall}>
+                            {remaining > 0 ? `${remaining} to play` : 'Complete'}
+                          </Text>
+                        )}
                       </View>
                     </View>
                   );
@@ -233,40 +451,42 @@ export default function LeaderboardScreen() {
           </View>
         )}
 
-        {/* ── PAIRINGS (read-only view for all players) ── */}
+        {/* ── PAIRINGS ── */}
         {activeTab === 'PAIRINGS' && (
           <View>
             <Text style={styles.pairNote}>
-              Your matchup groups for each round and segment. Contact the tournament owner to make changes.
+              Matchup groups for each round and segment.
             </Text>
             {config.pairings.length === 0 ? (
-              <EmptyCard text="No pairings set yet. The tournament owner can set them up in the Setup tab." />
+              <EmptyCard text="No pairings set yet. The owner can configure them in Setup → Pairings." />
             ) : (
               Array.from({ length: config.rounds }).map((_, r) => (
                 <View key={r} style={styles.roundCard}>
                   <Text style={styles.roundTitle}>Round {r + 1}</Text>
                   {[0, 1].map(s => {
                     const pairs = config.pairings.filter(p => p.roundIndex === r && p.segmentIndex === s);
-                    const fmt = config.roundsData?.[r]?.formats?.[s] ?? '—';
+                    const fmt   = config.roundsData?.[r]?.formats?.[s] ?? '—';
                     const getName = (id: string) => config.players.find(p => p.id === id)?.name ?? '?';
                     return (
                       <View key={s}>
-                        <Text style={styles.segLabel}>{s === 0 ? 'Front 9' : 'Back 9'} · {fmt}</Text>
+                        <Text style={styles.segLabelBar}>{s === 0 ? 'Front 9' : 'Back 9'} · {fmt}</Text>
                         {pairs.length === 0
                           ? <Text style={styles.noPairText}>No pairing for this segment.</Text>
                           : pairs.map(pair => (
                             <View key={pair.id} style={styles.pairCard}>
                               <View style={styles.pairTeam}>
                                 <View style={[styles.dot, { backgroundColor: '#1e3a8a' }]} />
-                                <Text style={styles.pairNames} numberOfLines={1}>
-                                  {pair.teamAPlayers.map(getName).join(' & ')}
+                                <Text style={styles.pairNames} numberOfLines={2}>
+                                  {pair.teamAPlayers.map(getName).join('\n& ')}
                                 </Text>
                               </View>
-                              <Text style={styles.vsText}>vs</Text>
-                              <View style={styles.pairTeam}>
+                              <View style={styles.vsBubble}>
+                                <Text style={styles.vsText}>VS</Text>
+                              </View>
+                              <View style={[styles.pairTeam, { alignItems: 'flex-end' }]}>
                                 <View style={[styles.dot, { backgroundColor: '#dc2626' }]} />
-                                <Text style={styles.pairNames} numberOfLines={1}>
-                                  {pair.teamBPlayers.map(getName).join(' & ')}
+                                <Text style={[styles.pairNames, { textAlign: 'right' }]} numberOfLines={2}>
+                                  {pair.teamBPlayers.map(getName).join('\n& ')}
                                 </Text>
                               </View>
                             </View>
@@ -284,7 +504,7 @@ export default function LeaderboardScreen() {
         {/* ── ROSTER ── */}
         {activeTab === 'ROSTER' && (
           <View>
-            {['A','B','C','D','UNASSIGNED']
+            {['A', 'B', 'C', 'D', 'UNASSIGNED']
               .filter(t => config.players.some(p => p.team === t))
               .map(t => (
                 <View key={t} style={styles.rosterCard}>
@@ -305,8 +525,8 @@ export default function LeaderboardScreen() {
                       <Text style={styles.rosterName}>{player.name}</Text>
                       <Text style={styles.rosterHC}>HC {player.hc}</Text>
                       {player.isPlaceholder && (
-                        <View style={styles.pendingBadge}>
-                          <Text style={styles.pendingBadgeText}>OPEN</Text>
+                        <View style={styles.openBadge}>
+                          <Text style={styles.openBadgeText}>OPEN</Text>
                         </View>
                       )}
                     </View>
@@ -321,6 +541,15 @@ export default function LeaderboardScreen() {
   );
 }
 
+function LegendItem({ color, label }: { color: string; label: string }) {
+  return (
+    <View style={styles.legendItem}>
+      <View style={[styles.legendDot, { backgroundColor: color }]} />
+      <Text style={styles.legendLabel}>{label}</Text>
+    </View>
+  );
+}
+
 function EmptyCard({ text }: { text: string }) {
   return (
     <View style={styles.emptyCard}>
@@ -329,44 +558,94 @@ function EmptyCard({ text }: { text: string }) {
   );
 }
 
+// ─── Styles ──────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30, backgroundColor: '#f8f9fa' },
   emptyTitle: { fontSize: 22, fontWeight: '800', color: '#1e293b', marginBottom: 8 },
   emptySub: { fontSize: 14, color: '#64748b', textAlign: 'center' },
-  header: { paddingTop: 56, paddingHorizontal: 20, paddingBottom: 12, backgroundColor: '#fff', borderBottomWidth: 1, borderColor: '#e2e8f0' },
-  headerTitle: { fontSize: 28, fontWeight: '900', color: '#1e293b' },
-  headerSub: { fontSize: 13, color: '#64748b', marginTop: 3 },
-  tabRow: { flexDirection: 'row', backgroundColor: '#fff', borderBottomWidth: 1, borderColor: '#e2e8f0' },
-  tab: { flex: 1, paddingVertical: 11, alignItems: 'center' },
-  tabActive: { borderBottomWidth: 2.5, borderBottomColor: '#1e3a8a' },
-  tabText: { fontSize: 11, fontWeight: '600', color: '#94a3b8' },
-  tabTextActive: { fontSize: 11, fontWeight: '800', color: '#1e3a8a' },
-  content: { padding: 16, paddingBottom: 100 },
-  standingCard: { backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 10, borderLeftWidth: 5, borderWidth: 1, borderColor: '#e2e8f0', flexDirection: 'row', alignItems: 'center' },
-  standingRank: { marginRight: 12 },
+
+  // PGA dark header
+  header: {
+    paddingTop: 58, paddingHorizontal: 20, paddingBottom: 16,
+    backgroundColor: '#0f172a',
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end',
+  },
+  headerTitle: { fontSize: 26, fontWeight: '900', color: '#fff' },
+  headerSub: { fontSize: 12, color: '#64748b', marginTop: 3 },
+  liveChip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#dc2626', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 20 },
+  liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#fff' },
+  liveText: { fontSize: 11, fontWeight: '900', color: '#fff', letterSpacing: 1 },
+
+  tabRow: { flexDirection: 'row', backgroundColor: '#1e293b', borderBottomWidth: 1, borderColor: '#334155' },
+  tab: { flex: 1, paddingVertical: 12, alignItems: 'center' },
+  tabActive: { borderBottomWidth: 2.5, borderBottomColor: '#a3e635' },
+  tabText: { fontSize: 10, fontWeight: '600', color: '#64748b' },
+  tabTextActive: { fontSize: 10, fontWeight: '800', color: '#a3e635' },
+
+  content: { padding: 14, paddingBottom: 100 },
+
+  colHeader: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 14, paddingVertical: 8,
+    backgroundColor: '#1e293b', borderRadius: 10, marginBottom: 8,
+  },
+  colHeaderText: { fontSize: 9, fontWeight: '900', color: '#64748b', letterSpacing: 1 },
+
+  // Animated standing card
+  standingCard: {
+    backgroundColor: '#fff', borderRadius: 14, padding: 14, marginBottom: 8,
+    borderLeftWidth: 5, borderWidth: 1, borderColor: '#e2e8f0',
+    flexDirection: 'row', alignItems: 'center',
+    shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 8, elevation: 2,
+    overflow: 'hidden',
+  },
+  rankBox: { width: 40, alignItems: 'center', marginRight: 4 },
   rankNum: { fontSize: 20, fontWeight: '900', color: '#94a3b8' },
+  rankChange: { fontSize: 11, fontWeight: '900' },
+  rankUp:   { color: '#16a34a' },
+  rankDown: { color: '#dc2626' },
+  teamNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   teamName: { fontSize: 18, fontWeight: '900' },
   teamPlayers: { fontSize: 12, color: '#64748b', marginTop: 2 },
+  segDotsRow: { flexDirection: 'row', gap: 4, marginTop: 8, flexWrap: 'wrap' },
+  segDot: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, backgroundColor: '#e2e8f0' },
+  segDotWin:  { backgroundColor: '#dcfce7' },
+  segDotLoss: { backgroundColor: '#fee2e2' },
+  segDotTie:  { backgroundColor: '#f1f5f9' },
+  segDotText: { fontSize: 8, fontWeight: '800', color: '#64748b' },
   ptsBox: { alignItems: 'center', minWidth: 52 },
-  ptsNum: { fontSize: 32, fontWeight: '900', color: '#1e293b' },
-  ptsLabel: { fontSize: 10, color: '#94a3b8', fontWeight: '700' },
+  ptsNum: { fontSize: 28, fontWeight: '900', color: '#1e293b' },
+  ptsLabel: { fontSize: 9, color: '#94a3b8', fontWeight: '700' },
+  thruLabel: { fontSize: 9, color: '#64748b', marginTop: 2, fontWeight: '600' },
+
+  legend: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 4, paddingTop: 12, flexWrap: 'wrap' },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendDot: { width: 10, height: 10, borderRadius: 5 },
+  legendLabel: { fontSize: 11, color: '#64748b', fontWeight: '600' },
+  legendFire: { fontSize: 11, color: '#64748b' },
+
   roundCard: { backgroundColor: '#fff', borderRadius: 14, marginBottom: 12, overflow: 'hidden', borderWidth: 1, borderColor: '#e2e8f0' },
   roundTitle: { fontSize: 13, fontWeight: '900', color: '#1e3a8a', padding: 14, borderBottomWidth: 1, borderColor: '#f1f5f9' },
-  segRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12, borderBottomWidth: 1, borderColor: '#f8f9fa' },
+  segRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 14, borderBottomWidth: 1, borderColor: '#f8f9fa' },
   segSide: { fontSize: 14, fontWeight: '700', color: '#1e293b' },
   segFmt: { fontSize: 10, color: '#94a3b8', marginTop: 2 },
+  segMatchup: { fontSize: 10, color: '#94a3b8', marginTop: 4, maxWidth: 160 },
   segRight: { alignItems: 'flex-end' },
   segResult: { fontSize: 15, fontWeight: '800', color: '#1e293b' },
-  segMatchup: { fontSize: 10, color: '#94a3b8', marginTop: 2, maxWidth: 180, textAlign: 'right' },
   segPending: { fontSize: 13, color: '#94a3b8', fontStyle: 'italic' },
+  thruSmall: { fontSize: 10, color: '#64748b', marginTop: 2 },
+
   pairNote: { fontSize: 13, color: '#64748b', lineHeight: 18, marginBottom: 12, fontStyle: 'italic' },
-  segLabel: { fontSize: 10, fontWeight: '800', color: '#64748b', letterSpacing: 1, paddingHorizontal: 14, paddingVertical: 8, backgroundColor: '#f8f9fa' },
+  segLabelBar: { fontSize: 10, fontWeight: '800', color: '#64748b', letterSpacing: 1, paddingHorizontal: 14, paddingVertical: 8, backgroundColor: '#f8f9fa' },
   noPairText: { fontSize: 12, color: '#94a3b8', paddingHorizontal: 14, paddingBottom: 10, fontStyle: 'italic' },
-  pairCard: { flexDirection: 'row', alignItems: 'center', padding: 12, borderTopWidth: 1, borderColor: '#f1f5f9' },
-  pairTeam: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
-  dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
+  pairCard: { flexDirection: 'row', alignItems: 'center', padding: 14, borderTopWidth: 1, borderColor: '#f1f5f9' },
+  pairTeam: { flex: 1, flexDirection: 'row', alignItems: 'flex-start', gap: 6 },
+  dot: { width: 8, height: 8, borderRadius: 4, marginTop: 3, flexShrink: 0 },
   pairNames: { fontSize: 13, fontWeight: '700', color: '#1e293b', flex: 1 },
-  vsText: { fontSize: 11, fontWeight: '900', color: '#94a3b8', marginHorizontal: 6 },
+  vsBubble: { backgroundColor: '#f1f5f9', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, marginHorizontal: 6 },
+  vsText: { fontSize: 10, fontWeight: '900', color: '#94a3b8' },
+
   rosterCard: { backgroundColor: '#fff', borderRadius: 14, marginBottom: 12, overflow: 'hidden', borderWidth: 1, borderColor: '#e2e8f0' },
   rosterHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12, paddingHorizontal: 14 },
   rosterTeamLabel: { color: '#fff', fontWeight: '900', fontSize: 13 },
@@ -374,8 +653,9 @@ const styles = StyleSheet.create({
   rosterRow: { flexDirection: 'row', alignItems: 'center', padding: 12, borderTopWidth: 1, borderColor: '#f1f5f9' },
   rosterName: { flex: 1, fontSize: 15, fontWeight: '600', color: '#1e293b' },
   rosterHC: { fontSize: 12, color: '#64748b', marginRight: 8 },
-  pendingBadge: { backgroundColor: '#fef3c7', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 20 },
-  pendingBadgeText: { fontSize: 9, fontWeight: '900', color: '#d97706' },
+  openBadge: { backgroundColor: '#fef3c7', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 20 },
+  openBadgeText: { fontSize: 9, fontWeight: '900', color: '#d97706' },
+
   emptyCard: { backgroundColor: '#fff', borderRadius: 14, padding: 20, borderWidth: 1, borderColor: '#e2e8f0', borderStyle: 'dashed' },
   emptyCardText: { fontSize: 13, color: '#94a3b8', textAlign: 'center', lineHeight: 19 },
-});
+} as any);
