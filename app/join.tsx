@@ -1,6 +1,7 @@
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Platform,
@@ -11,18 +12,19 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { Player, useTournament } from '../store/TournamentContext';
+import { supabase } from '../lib/supabase';
+import { useTournament } from '../store/TournamentContext';
 
 export default function JoinScreen() {
-  const { joinTournament, currentUser } = useTournament();
+  const { currentUser, openTournament, refreshTournament } = useTournament();
+  const { code } = useLocalSearchParams<{ code?: string }>();
   const router = useRouter();
 
-  const [form, setForm] = useState({
-    name: '',
-    hc: '',
-  });
+  const [form, setForm] = useState({ name: '', hc: '' });
+  const [joining, setJoining] = useState(false);
+  const [tournamentName, setTournamentName] = useState<string | null>(null);
 
-  // Auto-fill from the global currentUser profile
+  // Auto-fill from the user's profile
   useEffect(() => {
     if (currentUser) {
       setForm({
@@ -32,9 +34,22 @@ export default function JoinScreen() {
     }
   }, [currentUser]);
 
-  const handleJoin = () => {
-    if (!form.name) {
-      Alert.alert('Missing Info', 'Please provide your name.');
+  // Look up the tournament name to display it
+  useEffect(() => {
+    if (!code) return;
+    supabase
+      .from('tournaments')
+      .select('name')
+      .eq('id', code.toUpperCase())
+      .single()
+      .then(({ data }) => {
+        if (data?.name) setTournamentName(data.name);
+      });
+  }, [code]);
+
+  const handleJoin = async () => {
+    if (!form.name.trim()) {
+      Alert.alert('Missing Info', 'Please provide your display name.');
       return;
     }
     if (!currentUser) {
@@ -42,25 +57,72 @@ export default function JoinScreen() {
       router.replace('/auth');
       return;
     }
+    if (!code) {
+      Alert.alert('No Tournament', 'No tournament code was provided. Go back and enter one.');
+      return;
+    }
 
-    const newPlayer: Player = {
-      id: currentUser.id,
-      name: form.name,
-      email: currentUser.email,
-      hc: parseFloat(form.hc) || 0,
-      role: 'PLAYER',
-      team: 'UNASSIGNED',
-      groupId: null,
-      isPlaceholder: false,
-    };
+    setJoining(true);
+    try {
+      const tournamentId = code.toUpperCase();
 
-    joinTournament(newPlayer);
+      // 1. Confirm the tournament exists and fetch its players
+      const { data: tournament, error: tErr } = await supabase
+        .from('tournaments')
+        .select('*, tournament_players(*)')
+        .eq('id', tournamentId)
+        .single();
 
-    Alert.alert(
-      'You\'re In!',
-      'You\'ve been added to the tournament roster.',
-      [{ text: 'OK', onPress: () => router.replace('/(tabs)') }]
-    );
+      if (tErr || !tournament) {
+        Alert.alert('Not Found', 'That tournament code does not exist.');
+        return;
+      }
+
+      // 2. Check if already in the tournament — if so just open it
+      const existing = (tournament.tournament_players ?? []).find(
+        (p: any) => p.user_id === currentUser.id
+      );
+      if (existing) {
+        await openTournament(tournamentId);
+        router.replace('/(tabs)/scorecard');
+        return;
+      }
+
+      // 3. Insert a new player row for this user
+      const { error: insErr } = await supabase
+        .from('tournament_players')
+        .insert({
+          tournament_id: tournamentId,
+          user_id: currentUser.id,
+          display_name: form.name.trim(),
+          handicap: parseFloat(form.hc) || 0,
+          team: 'UNASSIGNED',
+          role: 'PLAYER',
+          is_placeholder: false,
+          group_id: null,
+        });
+
+      if (insErr) {
+        console.error('[join] insert failed:', insErr.message);
+        Alert.alert('Error', insErr.message);
+        return;
+      }
+
+      // 4. Load the tournament into context (also updates myTournamentIds via _loadMyTournaments)
+      await openTournament(tournamentId);
+      await refreshTournament();
+
+      Alert.alert(
+        "⛳ You're In!",
+        `You've joined${tournamentName ? ` "${tournamentName}"` : ' the tournament'}.`,
+        [{ text: 'Open Scorecard', onPress: () => router.replace('/(tabs)/scorecard') }]
+      );
+    } catch (err) {
+      console.error('[join] unexpected error:', err);
+      Alert.alert('Error', 'Something went wrong. Please try again.');
+    } finally {
+      setJoining(false);
+    }
   };
 
   return (
@@ -71,7 +133,11 @@ export default function JoinScreen() {
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.card}>
           <Text style={styles.title}>Join Tournament</Text>
-          <Text style={styles.subtitle}>Confirm your details for this matchup.</Text>
+          <Text style={styles.subtitle}>
+            {tournamentName
+              ? `Confirm your details for\n"${tournamentName}".`
+              : 'Confirm your details for this matchup.'}
+          </Text>
 
           <View style={styles.inputGroup}>
             <Text style={styles.label}>DISPLAY NAME</Text>
@@ -96,8 +162,15 @@ export default function JoinScreen() {
             <Text style={styles.hint}>This only affects this tournament.</Text>
           </View>
 
-          <TouchableOpacity style={styles.btn} onPress={handleJoin}>
-            <Text style={styles.btnText}>Confirm & Join</Text>
+          <TouchableOpacity
+            style={[styles.btn, joining && styles.btnDisabled]}
+            onPress={handleJoin}
+            disabled={joining}
+          >
+            {joining
+              ? <ActivityIndicator color="#fff" />
+              : <Text style={styles.btnText}>Confirm & Join</Text>
+            }
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -132,5 +205,6 @@ const styles = StyleSheet.create({
   },
   hint: { fontSize: 10, color: '#94a3b8', marginTop: 4, fontStyle: 'italic' },
   btn: { backgroundColor: '#1e3a8a', padding: 18, borderRadius: 12, marginTop: 10, alignItems: 'center' },
+  btnDisabled: { opacity: 0.55 },
   btnText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
 });

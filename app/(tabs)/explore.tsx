@@ -9,7 +9,7 @@ import {
   View,
 } from 'react-native';
 import { COURSES } from '../../constants/TorreyData';
-import { useTournament } from '../../store/TournamentContext';
+import { TeamId, useTournament } from '../../store/TournamentContext';
 import { calculateNet, getSegmentResult } from '../../utils/golfLogic';
 
 const TEAM_COLORS: Record<string, string> = {
@@ -22,6 +22,7 @@ type LeaderboardTab = 'STANDINGS' | 'SEGMENTS' | 'PAIRINGS' | 'ROSTER';
 
 interface StandingEntry {
   teamId: string;
+  displayName: string;
   totalPoints: number;
   segBreakdown: { label: string; result: string; pts: number }[];
   playerNames: string;
@@ -128,7 +129,7 @@ function StandingRow({ entry, rank, prevRank, isNew }: StandingRowProps) {
       {/* Team info */}
       <View style={{ flex: 1 }}>
         <View style={styles.teamNameRow}>
-          <Text style={[styles.teamName, { color: teamColor }]}>Team {entry.teamId}</Text>
+          <Text style={[styles.teamName, { color: teamColor }]}>{entry.displayName}</Text>
           {onFire  && <FireBadge />}
           {iceCold && <IceBadge />}
         </View>
@@ -268,7 +269,7 @@ export default function LeaderboardScreen() {
         .map(p => p.name.split(' ')[0])
         .join(' · ');
 
-      return { teamId, totalPoints, segBreakdown, playerNames, holesPlayed, recentResults };
+      return { teamId, displayName: config.teamNames?.[teamId as TeamId] ?? `Team ${teamId}`, totalPoints, segBreakdown, playerNames, holesPlayed, recentResults };
     }).sort((a, b) => b.totalPoints - a.totalPoints);
   }, [config, scores]);
 
@@ -408,8 +409,12 @@ export default function LeaderboardScreen() {
                     }
                   });
 
-                  const teamAName = teamAPlayers[0]?.team ? `Team ${teamAPlayers[0].team}` : 'A';
-                  const teamBName = teamBPlayers[0]?.team ? `Team ${teamBPlayers[0].team}` : 'B';
+                  const teamAName = teamAPlayers[0]?.team
+                    ? (config.teamNames?.[teamAPlayers[0].team] ?? `Team ${teamAPlayers[0].team}`)
+                    : 'A';
+                  const teamBName = teamBPlayers[0]?.team
+                    ? (config.teamNames?.[teamBPlayers[0].team] ?? `Team ${teamBPlayers[0].team}`)
+                    : 'B';
                   const result = aWins > bWins
                     ? `${teamAName} leads ${aWins - bWins} up`
                     : bWins > aWins
@@ -475,7 +480,7 @@ export default function LeaderboardScreen() {
                           : pairs.map(pair => (
                             <View key={pair.id} style={styles.pairCard}>
                               <View style={styles.pairTeam}>
-                                <View style={[styles.dot, { backgroundColor: '#1e3a8a' }]} />
+                                <View style={[styles.dot, { backgroundColor: TEAM_COLORS[config.players.find(p => p.id === pair.teamAPlayers[0])?.team ?? 'A'] ?? '#1e3a8a' }]} />
                                 <Text style={styles.pairNames} numberOfLines={2}>
                                   {pair.teamAPlayers.map(getName).join('\n& ')}
                                 </Text>
@@ -484,7 +489,7 @@ export default function LeaderboardScreen() {
                                 <Text style={styles.vsText}>VS</Text>
                               </View>
                               <View style={[styles.pairTeam, { alignItems: 'flex-end' }]}>
-                                <View style={[styles.dot, { backgroundColor: '#dc2626' }]} />
+                                <View style={[styles.dot, { backgroundColor: TEAM_COLORS[config.players.find(p => p.id === pair.teamBPlayers[0])?.team ?? 'B'] ?? '#dc2626' }]} />
                                 <Text style={[styles.pairNames, { textAlign: 'right' }]} numberOfLines={2}>
                                   {pair.teamBPlayers.map(getName).join('\n& ')}
                                 </Text>
@@ -510,7 +515,7 @@ export default function LeaderboardScreen() {
                 <View key={t} style={styles.rosterCard}>
                   <View style={[styles.rosterHeader, { backgroundColor: TEAM_COLORS[t] ?? '#64748b' }]}>
                     <Text style={styles.rosterTeamLabel}>
-                      {t === 'UNASSIGNED' ? 'Unassigned' : `Team ${t}`}
+                      {t === 'UNASSIGNED' ? 'Unassigned' : (config.teamNames?.[t as TeamId] ?? `Team ${t}`)}
                     </Text>
                     <Text style={styles.rosterHCAvg}>
                       Avg HC {(

@@ -7,10 +7,12 @@ import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useTournament } from '../../store/TournamentContext';
 
 export default function TabLayout() {
-  const { userRole } = useTournament();
+  const { config, userRole } = useTournament();
 
-  // Roles that can access the Setup tab
-  const canAccessSetup = userRole === 'OWNER' || userRole === 'ADMIN';
+  // Setup tab only visible when:
+  // 1. There is an active tournament open
+  // 2. The user is the owner or admin
+  const canAccessSetup = !!config && (userRole === 'OWNER' || userRole === 'ADMIN');
 
   return (
     <Tabs
@@ -52,7 +54,6 @@ export default function TabLayout() {
         }}
       />
 
-      {/* Leaderboard replaces the Expo explore placeholder */}
       <Tabs.Screen
         name="explore"
         options={{
@@ -73,11 +74,7 @@ export default function TabLayout() {
         }}
       />
 
-      {/*
-        FIX: Never conditionally render Tabs.Screen — it causes Expo Router crashes.
-        Instead, use href: null to hide the tab for non-admins while keeping
-        the screen registered in the navigator.
-      */}
+      {/* Setup: always registered, only shown when owner has a tournament open */}
       <Tabs.Screen
         name="setup"
         options={{
@@ -85,7 +82,6 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => (
             <IconSymbol size={28} name="gearshape.fill" color={color} />
           ),
-          // Hide tab item for non-admins; the screen route still exists
           href: canAccessSetup ? undefined : null,
         }}
       />

@@ -1,58 +1,49 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import {
-  Alert,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+  Alert, ScrollView, StyleSheet, Text, TextInput,
+  TouchableOpacity, View,
 } from 'react-native';
+import { MatchBanner } from '../../components/MatchBanner';
+import { PlayerAvatar } from '../../components/Playeravatar';
 import { COURSES, HoleData } from '../../constants/TorreyData';
 import { Player, useTournament } from '../../store/TournamentContext';
-import { calculateNet, getHoleResult, getMatchStatus, getStrokesForHole } from '../../utils/golfLogic';
+import {
+  calculateNet, getHoleResult, getMatchStatus, getStrokesForHole, holeResultLabel,
+} from '../../utils/golfLogic';
 
-// We import MatchBanner conditionally in case it doesn't exist yet
-let MatchBanner: any;
-try { MatchBanner = require('../../components/MatchBanner').MatchBanner; } catch { MatchBanner = null; }
-
-// ─── Score Cell ───────────────────────────────────────────────────────────────
-
-function scoreBg(gross: number, par: number) {
-  if (!gross) return { bg: '#f8f9fa', border: '#e2e8f0', circle: false, double: false };
+// ── Score cell ────────────────────────────────────────────────────────────────
+function scoreCellStyle(gross: number, par: number) {
+  if (!gross) return {};
   const d = gross - par;
-  if (d <= -2) return { bg: '#1e3a8a', border: '#1e3a8a', circle: true,  double: true  };
-  if (d === -1) return { bg: '#16a34a', border: '#16a34a', circle: true,  double: false };
-  if (d === 0)  return { bg: '#fff',    border: '#94a3b8', circle: false, double: false };
-  if (d === 1)  return { bg: '#fff',    border: '#dc2626', circle: false, double: false };
-  return          { bg: '#dc2626', border: '#dc2626', circle: false, double: true  };
+  if (d <= -2) return { bg: '#1e3a8a', border: '#1e3a8a', double: true, circle: true };
+  if (d === -1) return { bg: '#16a34a', border: '#16a34a', circle: true };
+  if (d === 0)  return { bg: '#fff',    border: '#94a3b8' };
+  if (d === 1)  return { bg: '#fff',    border: '#dc2626', bogey: true };
+  return              { bg: '#dc2626', border: '#dc2626', double: true };
 }
 
-interface ScoreCellProps {
-  gross: number; par: number; isEditable?: boolean;
-  onPress?: () => void; size?: 'sm' | 'md' | 'lg';
-}
-
-function ScoreCell({ gross, par, isEditable, onPress, size = 'md' }: ScoreCellProps) {
-  const s   = scoreBg(gross, par);
-  const dim = size === 'sm' ? 28 : size === 'lg' ? 56 : 38;
-  const fs  = size === 'sm' ? 11 : size === 'lg' ? 22 : 15;
-  const textWhite = s.bg !== '#fff' && s.bg !== '#f8f9fa';
-  const isBogey   = gross > 0 && gross - par === 1;
-
+function ScoreCell({
+  gross, par, isEditable, onPress, size = 'md',
+}: {
+  gross: number; par: number; isEditable?: boolean; onPress?: () => void; size?: 'sm' | 'md' | 'lg';
+}) {
+  const s   = scoreCellStyle(gross, par) as any;
+  const dim = size === 'sm' ? 30 : size === 'lg' ? 60 : 40;
+  const fs  = size === 'sm' ? 11 : size === 'lg' ? 24 : 15;
   return (
-    <TouchableOpacity onPress={onPress} disabled={!isEditable} activeOpacity={0.7}
+    <TouchableOpacity onPress={onPress} disabled={!isEditable}
       style={{ alignItems: 'center', justifyContent: 'center' }}>
       <View style={[
         styles.scoreCell,
         { width: dim, height: dim, borderRadius: s.circle ? dim / 2 : 5 },
         s.double && styles.doubleBorder,
-        { backgroundColor: s.bg, borderColor: s.border },
+        { backgroundColor: s.bg || '#f8f9fa', borderColor: s.border || '#e2e8f0' },
         isEditable && !gross && { borderStyle: 'dashed' },
       ]}>
         <Text style={[
           styles.scoreCellText, { fontSize: fs },
-          textWhite ? { color: '#fff' } : isBogey ? { color: '#dc2626' } : { color: '#1e293b' },
+          (s.bg && s.bg !== '#fff') ? { color: '#fff' } : { color: '#1e293b' },
+          s.bogey && { color: '#dc2626' },
         ]}>
           {gross > 0 ? gross : '–'}
         </Text>
@@ -61,91 +52,74 @@ function ScoreCell({ gross, par, isEditable, onPress, size = 'md' }: ScoreCellPr
   );
 }
 
-// ─── Main Screen ──────────────────────────────────────────────────────────────
+const isCombined = (fmt: string) => fmt === 'SCRAMBLE' || fmt === 'ALT-SHOT';
 
 export default function ScorecardScreen() {
-  const { config, currentUser, myPlayer, userRole, scores, updateScore, syncScoresToSupabase } = useTournament();
+  const { config, currentUser, myPlayer, scores, updateScore, syncScoresToSupabase } = useTournament();
 
-  const [viewMode, setViewMode]           = useState<'GRID' | 'FOCUS'>('GRID');
+  const [viewMode, setViewMode]           = useState<'GRID' | 'FOCUS'>('FOCUS');
   const [focusHole, setFocusHole]         = useState(0);
   const [activeRound, setActiveRound]     = useState(0);
   const [activeSegment, setActiveSegment] = useState(0);
   const [editingHole, setEditingHole]     = useState<{ holeIdx: number; playerId: string } | null>(null);
   const [editValue, setEditValue]         = useState('');
 
-  const isOwner = userRole === 'OWNER';
-
-  const roundData  = config?.roundsData?.[activeRound] ?? { course: 'SOUTH', formats: ['TOTALS', 'TOTALS'] };
-  const course     = COURSES[roundData.course as keyof typeof COURSES] ?? COURSES['SOUTH'];
-  const format     = roundData.formats?.[activeSegment] ?? 'TOTALS';
+  const roundData = config?.roundsData?.[activeRound] ?? { course: 'SOUTH', formats: ['TOTALS', 'TOTALS'] };
+  const course    = COURSES[roundData.course as keyof typeof COURSES] ?? COURSES['SOUTH'];
+  const format    = roundData.formats?.[activeSegment] ?? 'TOTALS';
   const holeData: HoleData[] = activeSegment === 0 ? course.front9 : course.back9;
-  const segOffset  = activeSegment === 0 ? 0 : 9;
+  const segOffset = activeSegment === 0 ? 0 : 9;
+  const combined  = isCombined(format);
+  const isOwner   = config?.ownerId === currentUser?.id;
 
   // ── Pairing awareness ──────────────────────────────────────────────────────
-
   const myPairing = useMemo(() => {
     if (!myPlayer) return null;
     return config?.pairings.find(p =>
-      p.roundIndex === activeRound &&
-      p.segmentIndex === activeSegment &&
+      p.roundIndex === activeRound && p.segmentIndex === activeSegment &&
       (p.teamAPlayers.includes(myPlayer.id) || p.teamBPlayers.includes(myPlayer.id))
     ) ?? null;
   }, [config?.pairings, myPlayer, activeRound, activeSegment]);
 
   const visiblePlayers: Player[] = useMemo(() => {
-    // Owner sees all players; others see only their pairing (or all if no pairing)
-    if (isOwner) return config?.players.filter(p => !p.isPlaceholder) ?? [];
     if (!myPairing) return config?.players.filter(p => !p.isPlaceholder) ?? [];
-    const allIds = [...myPairing.teamAPlayers, ...myPairing.teamBPlayers];
-    return config?.players.filter(p => allIds.includes(p.id)) ?? [];
-  }, [myPairing, config?.players, isOwner]);
+    const ids = [...myPairing.teamAPlayers, ...myPairing.teamBPlayers];
+    return config?.players.filter(p => ids.includes(p.id)) ?? [];
+  }, [myPairing, config?.players]);
 
-  // FIX #3 + #6: editablePlayers
-  // - Owner can edit ALL players (fix #6)
-  // - Non-owner with no pairing: can edit their own team
-  // - Non-owner with pairing: can edit their side of the pairing
+  // FIX: If owner OR user is in tournament (even without pairing), allow editing.
+  // Previously, myPlayer being null when no pairing was set blocked all score entry.
   const editablePlayers: Set<string> = useMemo(() => {
-    // FIX #6: Owner edits everyone
-    if (isOwner) {
-      return new Set((config?.players ?? []).filter(p => !p.isPlaceholder).map(p => p.id));
-    }
+    if (isOwner) return new Set(config?.players.map(p => p.id) ?? []);
     if (!myPlayer) return new Set<string>();
-
     if (myPairing) {
-      const myTeamIds = myPairing.teamAPlayers.includes(myPlayer.id)
-        ? myPairing.teamAPlayers
-        : myPairing.teamBPlayers;
-      return new Set(myTeamIds);
+      const myIds = myPairing.teamAPlayers.includes(myPlayer.id)
+        ? myPairing.teamAPlayers : myPairing.teamBPlayers;
+      return new Set(myIds);
     }
-
-    // FIX #3: No pairing — editable set includes self + same-team players
-    // Previously fell back to empty Set when myPlayer wasn't in a pairing,
-    // causing the focus view to show 0 editable players and no score inputs.
-    const sameTeam = (config?.players ?? [])
+    // No pairing yet — can still edit own score + teammates
+    const sameTeam = config?.players
       .filter(p => p.team === myPlayer.team && !p.isPlaceholder)
-      .map(p => p.id);
+      .map(p => p.id) ?? [];
     return new Set([myPlayer.id, ...sameTeam]);
-  }, [myPlayer, myPairing, config?.players, isOwner]);
+  }, [isOwner, myPlayer, myPairing, config?.players]);
 
   const teamAPlayers = myPairing
     ? config?.players.filter(p => myPairing.teamAPlayers.includes(p.id)) ?? []
-    : config?.players.filter(p => p.team === 'A' && !p.isPlaceholder) ?? [];
+    : config?.players.filter(p => (p.team === 'A' || p.team === 'C') && !p.isPlaceholder) ?? [];
 
   const teamBPlayers = myPairing
     ? config?.players.filter(p => myPairing.teamBPlayers.includes(p.id)) ?? []
-    : config?.players.filter(p => p.team === 'B' && !p.isPlaceholder) ?? [];
+    : config?.players.filter(p => (p.team === 'B' || p.team === 'D') && !p.isPlaceholder) ?? [];
 
-  // ── Score helpers ──────────────────────────────────────────────────────────
-
+  // ── Score helpers ─────────────────────────────────────────────────────────
   const getScore = useCallback((playerId: string, holeIdx: number): number => {
     return parseInt(scores?.[activeRound]?.[segOffset + holeIdx]?.[playerId] ?? '') || 0;
   }, [scores, activeRound, segOffset]);
 
   const handleScoreEdit = (holeIdx: number, playerId: string) => {
     if (!editablePlayers.has(playerId)) {
-      Alert.alert('Read Only', isOwner
-        ? 'Something went wrong — owner should be able to edit all scores.'
-        : 'You can only enter scores for your own team.');
+      Alert.alert('Read Only', 'You can only enter scores for your own team.');
       return;
     }
     setEditValue(scores?.[activeRound]?.[segOffset + holeIdx]?.[playerId] ?? '');
@@ -154,21 +128,37 @@ export default function ScorecardScreen() {
 
   const commitEdit = () => {
     if (!editingHole) return;
-    updateScore(activeRound, segOffset + editingHole.holeIdx, editingHole.playerId, editValue.trim());
+    const val = editValue.trim();
+    updateScore(activeRound, segOffset + editingHole.holeIdx, editingHole.playerId, val);
+    if (combined) {
+      const side = teamAPlayers.some(p => p.id === editingHole.playerId) ? teamAPlayers : teamBPlayers;
+      side.forEach(p => {
+        if (p.id !== editingHole.playerId)
+          updateScore(activeRound, segOffset + editingHole.holeIdx, p.id, val);
+      });
+    }
     setEditingHole(null);
-    setTimeout(() => syncScoresToSupabase(activeRound), 1200);
+    setTimeout(() => syncScoresToSupabase(activeRound), 1500);
   };
 
-  // ── Match history ──────────────────────────────────────────────────────────
-
-  const matchHistory = useMemo(() => {
+  // ── Match history (null-preserving) ───────────────────────────────────────
+  const matchHistory = useMemo((): (('WIN' | 'LOSS' | 'PUSH') | null)[] => {
     return holeData.map((hole, idx) => {
-      const aS = teamAPlayers.map(p => getScore(p.id, idx));
-      const bS = teamBPlayers.map(p => getScore(p.id, idx));
-      if ([...aS, ...bS].filter(s => s > 0).length < 2) return null;
-      return getHoleResult(format, [...aS, ...bS], [...teamAPlayers.map(p => p.hc), ...teamBPlayers.map(p => p.hc)], hole.si);
-    }).filter((r): r is 'WIN' | 'LOSS' | 'PUSH' => r !== null);
-  }, [holeData, teamAPlayers, teamBPlayers, scores, activeRound, segOffset]);
+      if (combined) {
+        const aScore = getScore(teamAPlayers[0]?.id ?? '', idx);
+        const bScore = getScore(teamBPlayers[0]?.id ?? '', idx);
+        if (!aScore || !bScore) return null;
+        const aHc = teamAPlayers.length ? Math.min(...teamAPlayers.map(p => p.hc)) : 0;
+        const bHc = teamBPlayers.length ? Math.min(...teamBPlayers.map(p => p.hc)) : 0;
+        return getHoleResult(format, [aScore, aScore, bScore, bScore], [aHc, aHc, bHc, bHc], hole.si);
+      }
+      const aS  = teamAPlayers.map(p => getScore(p.id, idx));
+      const bS  = teamBPlayers.map(p => getScore(p.id, idx));
+      const aHc = teamAPlayers.map(p => p.hc);
+      const bHc = teamBPlayers.map(p => p.hc);
+      return getHoleResult(format, [...aS, ...bS], [...aHc, ...bHc], hole.si);
+    });
+  }, [holeData, teamAPlayers, teamBPlayers, scores, activeRound, segOffset, format, combined]);
 
   const segLabel = `R${activeRound + 1} · ${activeSegment === 0 ? 'Front 9' : 'Back 9'} · ${format}`;
 
@@ -176,260 +166,354 @@ export default function ScorecardScreen() {
     return (
       <View style={styles.centered}>
         <Text style={styles.emptyTitle}>No Active Tournament</Text>
-        <Text style={styles.emptyText}>Create or join a tournament from the Home tab.</Text>
+        <Text style={styles.emptyText}>Open a tournament from the Home tab to view the scorecard.</Text>
       </View>
     );
   }
 
+  // ── Grid rows ──────────────────────────────────────────────────────────────
+  interface GridRow {
+    key: string; primaryPlayer: Player; partnerPlayer?: Player;
+    scorePlayerId: string; hc: number; canEdit: boolean; isTeamA: boolean;
+  }
+
+  const gridRows: GridRow[] = useMemo(() => {
+    if (!combined) {
+      return visiblePlayers.map(p => ({
+        key: p.id, primaryPlayer: p, scorePlayerId: p.id, hc: p.hc,
+        canEdit: editablePlayers.has(p.id),
+        isTeamA: teamAPlayers.some(tp => tp.id === p.id),
+      }));
+    }
+    const rows: GridRow[] = [];
+    [{ side: teamAPlayers, isA: true }, { side: teamBPlayers, isA: false }].forEach(({ side, isA }) => {
+      if (!side.length) return;
+      rows.push({
+        key: side.map(p => p.id).join('-'),
+        primaryPlayer: side[0], partnerPlayer: side[1],
+        scorePlayerId: side[0].id, hc: Math.min(...side.map(p => p.hc)),
+        canEdit: side.some(p => editablePlayers.has(p.id)), isTeamA: isA,
+      });
+    });
+    return rows;
+  }, [combined, visiblePlayers, teamAPlayers, teamBPlayers, editablePlayers]);
+
   // ── GRID VIEW ─────────────────────────────────────────────────────────────
+  const TEAM_COLORS_GRID: Record<string, string> = {
+    A: '#1e3a8a', B: '#b91c1c', C: '#15803d', D: '#b45309', UNASSIGNED: '#64748b',
+  };
 
-  const renderGrid = () => (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-      <View>
-        <View style={styles.gridHeader}>
-          <View style={styles.gridPlayerCol}>
-            <Text style={styles.gridHeaderText}>PLAYER</Text>
-          </View>
-          <View style={styles.gridMetricCol}>
-            <Text style={styles.gridHeaderText}>METRIC</Text>
-          </View>
-          {holeData.map((hole, i) => (
-            <View key={i} style={styles.gridHoleCol}>
-              <Text style={styles.gridHeaderHole}>{hole.hole}</Text>
-              <Text style={styles.gridHeaderPar}>P{hole.par}</Text>
-            </View>
-          ))}
-          <View style={styles.gridTotalCol}>
-            <Text style={styles.gridHeaderText}>TOT</Text>
-          </View>
-        </View>
+  const renderGrid = () => {
+    // Group rows into Team A side and Team B side for side-by-side layout
+    const teamARows = gridRows.filter(r => r.isTeamA);
+    const teamBRows = gridRows.filter(r => !r.isTeamA);
 
-        <ScrollView style={{ maxHeight: 500 }}>
-          {visiblePlayers.map((player, pIdx) => {
-            const canEdit    = editablePlayers.has(player.id);
-            const grossTotal = holeData.reduce((s, _, i) => s + getScore(player.id, i), 0);
-            const netTotal   = holeData.reduce((s, hole, i) => {
-              const g = getScore(player.id, i);
-              return s + (g > 0 ? calculateNet(g, player.hc, hole.si) : 0);
-            }, 0);
+    const teamAId  = myPairing?.teamAId ?? teamAPlayers[0]?.team ?? 'A';
+    const teamBId  = myPairing?.teamBId ?? teamBPlayers[0]?.team ?? 'B';
+    const teamADisplayName = config.teamNames?.[teamAId] ?? `Team ${teamAId}`;
+    const teamBDisplayName = config.teamNames?.[teamBId] ?? `Team ${teamBId}`;
+    const teamAColor = TEAM_COLORS_GRID[teamAId] ?? '#1e3a8a';
+    const teamBColor = TEAM_COLORS_GRID[teamBId] ?? '#b91c1c';
 
-            return (
-              <View key={player.id}>
-                {/* Gross row */}
-                <View style={[styles.gridRow, !canEdit && styles.gridRowOpponent, pIdx === 0 && styles.gridRowFirst]}>
-                  <View style={[styles.gridPlayerCol, styles.gridPlayerCell]}>
-                    <View style={[styles.teamDot, { backgroundColor: player.team === 'A' ? '#1e3a8a' : player.team === 'B' ? '#dc2626' : '#64748b' }]} />
-                    <Text style={styles.gridPlayerName} numberOfLines={1}>{player.name.split(' ')[0]}</Text>
-                    {isOwner && canEdit && (
-                      <Text style={styles.ownerTag}>✏️</Text>
-                    )}
-                  </View>
-                  <View style={styles.gridMetricCol}>
-                    <Text style={styles.gridMetricText}>Gross</Text>
-                  </View>
-                  {holeData.map((hole, i) => (
-                    <View key={i} style={styles.gridHoleCol}>
-                      <ScoreCell
-                        gross={getScore(player.id, i)} par={hole.par}
-                        isEditable={canEdit}
-                        onPress={() => handleScoreEdit(i, player.id)}
-                        size="sm"
-                      />
+    const renderRows = (rows: typeof gridRows, teamColor: string) =>
+      rows.map((row, rIdx) => {
+        const grossTotal = holeData.reduce((s, _, i) => s + getScore(row.scorePlayerId, i), 0);
+        const netTotal   = holeData.reduce((s, hole, i) => {
+          const g = getScore(row.scorePlayerId, i);
+          return s + (g > 0 ? calculateNet(g, row.hc, hole.si) : 0);
+        }, 0);
+        return (
+          <View key={row.key}>
+            {/* Gross row */}
+            <View style={[styles.gridRow, rIdx === 0 && styles.gridRowFirst]}>
+              <View style={[styles.gridPlayerCol, styles.gridPlayerCell]}>
+                <View style={styles.avatarStack}>
+                  <PlayerAvatar userId={row.primaryPlayer.userId} name={row.primaryPlayer.name} team={row.primaryPlayer.team} size={44} showRing />
+                  {row.partnerPlayer && (
+                    <View style={styles.avatarOverlap}>
+                      <PlayerAvatar userId={row.partnerPlayer.userId} name={row.partnerPlayer.name} team={row.partnerPlayer.team} size={30} showRing />
                     </View>
-                  ))}
-                  <View style={styles.gridTotalCol}>
-                    <Text style={styles.gridTotalText}>{grossTotal > 0 ? grossTotal : '—'}</Text>
-                  </View>
+                  )}
                 </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.gridPlayerName} numberOfLines={1}>
+                    {row.primaryPlayer.name.split(' ')[0]}
+                    {row.partnerPlayer ? ` / ${row.partnerPlayer.name.split(' ')[0]}` : ''}
+                  </Text>
+                  {!row.canEdit && <Text style={{ fontSize: 8, color: '#94a3b8', fontStyle: 'italic' }}>read-only</Text>}
+                </View>
+              </View>
+              <View style={styles.gridMetricCol}><Text style={styles.gridMetricText}>Gross</Text></View>
+              {holeData.map((hole, i) => (
+                <View key={i} style={styles.gridHoleCol}>
+                  <ScoreCell gross={getScore(row.scorePlayerId, i)} par={hole.par}
+                    isEditable={row.canEdit} onPress={() => handleScoreEdit(i, row.scorePlayerId)} size="sm" />
+                </View>
+              ))}
+              <View style={styles.gridTotalCol}>
+                <Text style={styles.gridTotalText}>{grossTotal > 0 ? grossTotal : '—'}</Text>
+              </View>
+            </View>
 
-                {/* Net row */}
-                {config.isHandicapEnabled && (
-                  <View style={[styles.gridRow, styles.gridRowNet, !canEdit && styles.gridRowOpponent]}>
-                    <View style={styles.gridPlayerCol} />
-                    <View style={styles.gridMetricCol}>
-                      <Text style={[styles.gridMetricText, { color: '#1e3a8a' }]}>Net</Text>
+            {/* Net row */}
+            {config.isHandicapEnabled && (
+              <View style={[styles.gridRow, styles.gridRowNet]}>
+                <View style={styles.gridPlayerCol} />
+                <View style={styles.gridMetricCol}><Text style={[styles.gridMetricText, { color: teamColor }]}>Net</Text></View>
+                {holeData.map((hole, i) => {
+                  const g = getScore(row.scorePlayerId, i);
+                  const net = g > 0 ? calculateNet(g, row.hc, hole.si) : 0;
+                  const pops = getStrokesForHole(row.hc, hole.si);
+                  return (
+                    <View key={i} style={styles.gridHoleCol}>
+                      <Text style={styles.gridNetText}>{net > 0 ? net : '—'}</Text>
+                      {pops > 0 && <Text style={styles.popDot}>{'•'.repeat(pops)}</Text>}
                     </View>
-                    {holeData.map((hole, i) => {
-                      const g = getScore(player.id, i);
-                      const net  = g > 0 ? calculateNet(g, player.hc, hole.si) : 0;
-                      const pops = getStrokesForHole(player.hc, hole.si);
-                      return (
-                        <View key={i} style={styles.gridHoleCol}>
-                          <Text style={styles.gridNetText}>{net > 0 ? net : '—'}</Text>
-                          {pops > 0 && <Text style={styles.popDot}>{'•'.repeat(pops)}</Text>}
-                        </View>
-                      );
-                    })}
-                    <View style={styles.gridTotalCol}>
-                      <Text style={[styles.gridTotalText, { color: '#1e3a8a' }]}>{netTotal > 0 ? netTotal : '—'}</Text>
-                    </View>
-                  </View>
-                )}
+                  );
+                })}
+                <View style={styles.gridTotalCol}>
+                  <Text style={[styles.gridTotalText, { color: teamColor }]}>{netTotal > 0 ? netTotal : '—'}</Text>
+                </View>
+              </View>
+            )}
 
-                {/* Match points row */}
-                <View style={[styles.gridRow, styles.gridRowPoints, !canEdit && styles.gridRowOpponent]}>
-                  <View style={styles.gridPlayerCol} />
-                  <View style={styles.gridMetricCol}>
-                    <Text style={[styles.gridMetricText, { color: '#16a34a', fontSize: 9 }]}>Pts</Text>
+            {/* W/L/H row */}
+            <View style={[styles.gridRow, styles.gridRowWLH]}>
+              <View style={styles.gridPlayerCol} />
+              <View style={styles.gridMetricCol}><Text style={[styles.gridMetricText, { color: '#64748b', fontSize: 9 }]}>W/L/H</Text></View>
+              {holeData.map((_, i) => {
+                const { text, color } = holeResultLabel(matchHistory[i], row.isTeamA);
+                return (
+                  <View key={i} style={styles.gridHoleCol}>
+                    <Text style={[styles.gridNetText, { color, fontWeight: '900' }]}>{text}</Text>
                   </View>
-                  {holeData.map((_, i) => {
-                    const result  = matchHistory[i];
-                    const isTeamA = teamAPlayers.some(p => p.id === player.id);
-                    let pts = '';
-                    if (result === 'WIN'  && isTeamA)  pts = '1';
-                    else if (result === 'LOSS' && !isTeamA) pts = '1';
-                    else if (result === 'PUSH') pts = '½';
-                    else if (result)            pts = '0';
-                    return (
-                      <View key={i} style={styles.gridHoleCol}>
-                        <Text style={[styles.gridNetText, {
-                          color: pts === '1' ? '#16a34a' : pts === '0' ? '#dc2626' : '#94a3b8',
-                        }]}>{pts}</Text>
-                      </View>
-                    );
-                  })}
+                );
+              })}
+              <View style={styles.gridTotalCol} />
+            </View>
+            <View style={styles.playerDivider} />
+          </View>
+        );
+      });
+
+    return (
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        <View>
+          {/* Hole header */}
+          <View style={styles.gridHeader}>
+            <View style={styles.gridPlayerCol}><Text style={styles.gridHeaderText}>PLAYER</Text></View>
+            <View style={styles.gridMetricCol}><Text style={styles.gridHeaderText}>METRIC</Text></View>
+            {holeData.map((hole, i) => (
+              <View key={i} style={styles.gridHoleCol}>
+                <Text style={styles.gridHeaderHole}>{hole.hole}</Text>
+                <Text style={styles.gridHeaderPar}>P{hole.par}</Text>
+              </View>
+            ))}
+            <View style={styles.gridTotalCol}><Text style={styles.gridHeaderText}>TOT</Text></View>
+          </View>
+
+          <ScrollView style={{ maxHeight: 520 }}>
+            {/* Team A section */}
+            {teamARows.length > 0 && (
+              <View>
+                <View style={[styles.gridTeamHeader, { backgroundColor: teamAColor }]}>
+                  <View style={styles.gridPlayerCol}>
+                    <Text style={styles.gridTeamHeaderText}>{teamADisplayName.toUpperCase()}</Text>
+                  </View>
+                  <View style={styles.gridMetricCol} />
+                  {holeData.map((_, i) => <View key={i} style={styles.gridHoleCol} />)}
                   <View style={styles.gridTotalCol} />
                 </View>
-
-                <View style={styles.playerDivider} />
+                {renderRows(teamARows, teamAColor)}
               </View>
-            );
-          })}
-        </ScrollView>
-      </View>
-    </ScrollView>
-  );
+            )}
+
+            {/* VS divider between teams */}
+            {teamARows.length > 0 && teamBRows.length > 0 && (
+              <View style={styles.gridVsDivider}>
+                <View style={[styles.gridVsLine, { backgroundColor: teamAColor }]} />
+                <View style={styles.gridVsBubble}>
+                  <Text style={styles.gridVsText}>VS</Text>
+                </View>
+                <View style={[styles.gridVsLine, { backgroundColor: teamBColor }]} />
+              </View>
+            )}
+
+            {/* Team B section */}
+            {teamBRows.length > 0 && (
+              <View>
+                <View style={[styles.gridTeamHeader, { backgroundColor: teamBColor }]}>
+                  <View style={styles.gridPlayerCol}>
+                    <Text style={styles.gridTeamHeaderText}>{teamBDisplayName.toUpperCase()}</Text>
+                  </View>
+                  <View style={styles.gridMetricCol} />
+                  {holeData.map((_, i) => <View key={i} style={styles.gridHoleCol} />)}
+                  <View style={styles.gridTotalCol} />
+                </View>
+                {renderRows(teamBRows, teamBColor)}
+              </View>
+            )}
+          </ScrollView>
+        </View>
+      </ScrollView>
+    );
+  };
 
   // ── FOCUS VIEW ────────────────────────────────────────────────────────────
+  const focusHoleData  = holeData[focusHole];
+  const currentHoleResult = matchHistory[focusHole];
 
-  const focusHoleData = holeData[focusHole];
+  interface FocusGroup {
+    key: string; players: Player[]; scorePlayerId: string;
+    hc: number; canEdit: boolean; isTeamA: boolean; isOpponent: boolean;
+  }
 
-  // FIX #3: Always derive focus editable/opponent from the corrected editablePlayers set.
-  // When no pairing is set, editablePlayers now correctly includes same-team players,
-  // so this will always show score inputs for the current user and teammates.
-  const focusEditablePlayers = visiblePlayers.filter(p => editablePlayers.has(p.id));
-  const focusOpponents       = visiblePlayers.filter(p => !editablePlayers.has(p.id));
+  const focusGroups: FocusGroup[] = useMemo(() => {
+    if (!combined) {
+      const editList = visiblePlayers.filter(p => editablePlayers.has(p.id));
+      const oppList  = visiblePlayers.filter(p => !editablePlayers.has(p.id));
+      return [...editList, ...oppList].map(p => ({
+        key: p.id, players: [p], scorePlayerId: p.id, hc: p.hc,
+        canEdit: editablePlayers.has(p.id),
+        isTeamA: teamAPlayers.some(tp => tp.id === p.id),
+        isOpponent: !editablePlayers.has(p.id),
+      }));
+    }
+    const groups: FocusGroup[] = [];
+    [{ side: teamAPlayers, isA: true }, { side: teamBPlayers, isA: false }].forEach(({ side, isA }) => {
+      if (!side.length) return;
+      const canEdit = side.some(p => editablePlayers.has(p.id));
+      groups.push({
+        key: side.map(p => p.id).join('-'), players: side,
+        scorePlayerId: side[0].id, hc: Math.min(...side.map(p => p.hc)),
+        canEdit, isTeamA: isA, isOpponent: !canEdit,
+      });
+    });
+    return groups;
+  }, [combined, visiblePlayers, teamAPlayers, teamBPlayers, editablePlayers]);
 
   const renderFocus = () => (
     <ScrollView contentContainerStyle={styles.focusContainer}>
       {/* Hole nav */}
       <View style={styles.focusNav}>
-        <TouchableOpacity onPress={() => setFocusHole(h => Math.max(0, h - 1))}
-          disabled={focusHole === 0} style={styles.navBtn}>
+        <TouchableOpacity onPress={() => setFocusHole(h => Math.max(0, h - 1))} disabled={focusHole === 0} style={styles.navBtn}>
           <Text style={[styles.navArrow, focusHole === 0 && styles.navDisabled]}>‹</Text>
         </TouchableOpacity>
         <View style={styles.focusHoleInfo}>
           <Text style={styles.focusHoleNum}>Hole {focusHoleData?.hole}</Text>
-          <Text style={styles.focusHoleMeta}>
-            Par {focusHoleData?.par} · SI {focusHoleData?.si} · {focusHoleData?.yardage} yds
-          </Text>
+          <Text style={styles.focusHoleMeta}>Par {focusHoleData?.par} · SI {focusHoleData?.si} · {focusHoleData?.yardage} yds</Text>
         </View>
-        <TouchableOpacity onPress={() => setFocusHole(h => Math.min(8, h + 1))}
-          disabled={focusHole === 8} style={styles.navBtn}>
+        <TouchableOpacity onPress={() => setFocusHole(h => Math.min(8, h + 1))} disabled={focusHole === 8} style={styles.navBtn}>
           <Text style={[styles.navArrow, focusHole === 8 && styles.navDisabled]}>›</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Hole card */}
+      {/* Hole info card */}
       <View style={styles.focusCard}>
         <Text style={styles.focusYardage}>{focusHoleData?.yardage}</Text>
         <Text style={styles.focusYardageLabel}>YARDS</Text>
         <View style={styles.focusParRow}>
           <Text style={styles.focusBadge}>PAR {focusHoleData?.par}</Text>
           <Text style={styles.focusBadge}>SI {focusHoleData?.si}</Text>
+          {currentHoleResult && (
+            <View style={[styles.focusResultBadge, {
+              backgroundColor: currentHoleResult === 'WIN' ? 'rgba(22,163,74,0.3)'
+                : currentHoleResult === 'LOSS' ? 'rgba(220,38,38,0.3)'
+                : 'rgba(255,255,255,0.15)',
+            }]}>
+              <Text style={styles.focusResultText}>
+                {currentHoleResult === 'WIN' ? '✓ Your team wins'
+                  : currentHoleResult === 'LOSS' ? '✗ Opponents win'
+                  : '= Halved'}
+              </Text>
+            </View>
+          )}
         </View>
-        <Text style={styles.focusGps}>📍 GPS · Distance to Pin Coming Soon</Text>
       </View>
 
-      {/* YOUR TEAM / Owner sees all as editable */}
-      {focusEditablePlayers.length === 0 ? (
+      {combined && (
+        <View style={styles.combinedBanner}>
+          <Text style={styles.combinedBannerText}>{format} · one shared score per team side</Text>
+        </View>
+      )}
+
+      {focusGroups.length === 0 ? (
         <View style={styles.noPlayerCard}>
           <Text style={styles.noPlayerText}>
-            No players assigned yet.{'\n'}
-            {isOwner
-              ? 'Add players in Setup → Roster.'
-              : 'The tournament owner needs to configure pairings.'}
+            No players in this pairing.{'\n'}
+            The tournament owner needs to configure pairings in Setup.
           </Text>
         </View>
       ) : (
-        <>
-          <Text style={styles.focusSectionLabel}>
-            {isOwner ? 'ALL PLAYERS (OWNER)' : 'YOUR TEAM'}
-          </Text>
-          {focusEditablePlayers.map(player => {
-            const g      = getScore(player.id, focusHole);
-            const pops   = getStrokesForHole(player.hc, focusHoleData?.si ?? 0);
-            const net    = g > 0 ? calculateNet(g, player.hc, focusHoleData?.si ?? 0) : 0;
-            const isEdit = editingHole?.holeIdx === focusHole && editingHole?.playerId === player.id;
+        focusGroups.map((group, gIdx) => {
+          const g    = getScore(group.scorePlayerId, focusHole);
+          const pops = getStrokesForHole(group.hc, focusHoleData?.si ?? 0);
+          const net  = g > 0 ? calculateNet(g, group.hc, focusHoleData?.si ?? 0) : 0;
+          const isEdit = editingHole?.holeIdx === focusHole &&
+            group.players.some(p => p.id === editingHole?.playerId);
+          const showYourTeam = gIdx === 0 && !group.isOpponent;
+          const prevIsEdit   = gIdx > 0 && !focusGroups[gIdx - 1].isOpponent;
+          const showOpp      = group.isOpponent && (!gIdx || prevIsEdit);
 
-            return (
-              <View key={player.id} style={styles.focusPlayerRow}>
-                <View style={[styles.teamColorBar, {
-                  backgroundColor: player.team === 'A' ? '#1e3a8a' : player.team === 'B' ? '#dc2626' : '#64748b'
-                }]} />
+          return (
+            <View key={group.key}>
+              {showYourTeam && <Text style={styles.focusSectionLabel}>YOUR TEAM</Text>}
+              {showOpp && <Text style={[styles.focusSectionLabel, { color: '#dc2626', marginTop: 16 }]}>OPPONENTS</Text>}
+
+              <View style={[styles.focusPlayerRow, group.isOpponent && styles.focusPlayerRowOpp]}>
+                {/* Larger avatar area */}
+                <View style={styles.focusAvatarCol}>
+                  {group.players.map((p, pi) => (
+                    <View key={p.id} style={pi > 0 ? { marginTop: -10 } : {}}>
+                      <PlayerAvatar userId={p.userId} name={p.name} team={p.team} size={80} showRing />
+                    </View>
+                  ))}
+                </View>
+
                 <View style={styles.focusPlayerInfo}>
-                  <Text style={styles.focusPlayerName}>{player.name}</Text>
+                  <Text style={[styles.focusPlayerName, group.isOpponent && { color: '#64748b' }]}>
+                    {group.players.map(p => p.name).join(' / ')}
+                  </Text>
                   <Text style={styles.focusPlayerMeta}>
-                    HC {player.hc}
+                    HC {group.hc}
                     {pops > 0 ? ` · +${pops} pop${pops > 1 ? 's' : ''}` : ' · no pops'}
                     {net > 0 ? ` · Net ${net}` : ''}
                   </Text>
+                  {!group.canEdit && (
+                    <Text style={styles.readOnlyTag}>read-only</Text>
+                  )}
                 </View>
 
-                {isEdit ? (
-                  <View style={styles.editBox}>
-                    <TextInput
-                      style={styles.focusInput}
-                      keyboardType="number-pad"
-                      autoFocus
-                      value={editValue}
-                      onChangeText={setEditValue}
-                      maxLength={2}
-                      onSubmitEditing={commitEdit}
-                      onBlur={commitEdit}
-                      returnKeyType="done"
-                      selectTextOnFocus
-                    />
-                  </View>
+                {group.canEdit ? (
+                  isEdit ? (
+                    <View style={styles.editBox}>
+                      <TextInput
+                        style={styles.focusInput}
+                        keyboardType="number-pad" autoFocus
+                        value={editValue} onChangeText={setEditValue}
+                        maxLength={2} onSubmitEditing={commitEdit}
+                        onBlur={commitEdit} returnKeyType="done" selectTextOnFocus
+                      />
+                    </View>
+                  ) : (
+                    <TouchableOpacity onPress={() => handleScoreEdit(focusHole, group.scorePlayerId)} activeOpacity={0.7}>
+                      <ScoreCell gross={g} par={focusHoleData?.par ?? 4} isEditable size="lg" />
+                    </TouchableOpacity>
+                  )
                 ) : (
-                  <TouchableOpacity onPress={() => handleScoreEdit(focusHole, player.id)} activeOpacity={0.7}>
-                    <ScoreCell gross={g} par={focusHoleData?.par ?? 4} isEditable size="lg" />
-                  </TouchableOpacity>
+                  <ScoreCell gross={g} par={focusHoleData?.par ?? 4} isEditable={false} size="md" />
                 )}
               </View>
-            );
-          })}
-        </>
-      )}
-
-      {/* OPPONENTS — read only (not shown to owner since they see all) */}
-      {!isOwner && focusOpponents.length > 0 && (
-        <>
-          <Text style={[styles.focusSectionLabel, { color: '#dc2626', marginTop: 20 }]}>
-            OPPONENTS (read-only)
-          </Text>
-          {focusOpponents.map(player => {
-            const g = getScore(player.id, focusHole);
-            return (
-              <View key={player.id} style={[styles.focusPlayerRow, styles.focusPlayerRowOpp]}>
-                <View style={[styles.teamColorBar, {
-                  backgroundColor: player.team === 'A' ? '#1e3a8a' : player.team === 'B' ? '#dc2626' : '#64748b'
-                }]} />
-                <View style={styles.focusPlayerInfo}>
-                  <Text style={[styles.focusPlayerName, { color: '#64748b' }]}>{player.name}</Text>
-                  <Text style={styles.focusPlayerMeta}>HC {player.hc}</Text>
-                </View>
-                <ScoreCell gross={g} par={focusHoleData?.par ?? 4} isEditable={false} size="md" />
-              </View>
-            );
-          })}
-        </>
+            </View>
+          );
+        })
       )}
 
       {/* Progress dots */}
       <View style={styles.progressRow}>
         {holeData.map((_, i) => {
-          const filled = getScore(myPlayer?.id ?? (isOwner ? visiblePlayers[0]?.id : ''), i) > 0;
+          const refId  = focusGroups[0]?.scorePlayerId ?? myPlayer?.id ?? '';
+          const filled = getScore(refId, i) > 0;
           return (
             <TouchableOpacity key={i} onPress={() => setFocusHole(i)}>
               <View style={[
@@ -445,20 +529,16 @@ export default function ScorecardScreen() {
   );
 
   // ── MAIN RENDER ───────────────────────────────────────────────────────────
-
   return (
     <View style={styles.container}>
-      {MatchBanner && (
-        <MatchBanner segmentName={segLabel} status={getMatchStatus(matchHistory)} />
-      )}
+      <MatchBanner segmentName={segLabel} status={getMatchStatus(matchHistory)} />
 
       {config.rounds > 1 && (
         <View style={styles.roundRow}>
           {Array.from({ length: config.rounds }).map((_, i) => (
             <TouchableOpacity key={i}
               style={[styles.roundPill, activeRound === i && styles.roundPillActive]}
-              onPress={() => { setActiveRound(i); setFocusHole(0); }}
-            >
+              onPress={() => { setActiveRound(i); setFocusHole(0); }}>
               <Text style={activeRound === i ? styles.roundPillTextActive : styles.roundPillText}>R{i + 1}</Text>
             </TouchableOpacity>
           ))}
@@ -469,8 +549,7 @@ export default function ScorecardScreen() {
         {(['Front 9', 'Back 9'] as const).map((label, sIdx) => (
           <TouchableOpacity key={sIdx}
             style={[styles.segBtn, activeSegment === sIdx && styles.segBtnActive]}
-            onPress={() => { setActiveSegment(sIdx); setFocusHole(0); }}
-          >
+            onPress={() => { setActiveSegment(sIdx); setFocusHole(0); }}>
             <Text style={activeSegment === sIdx ? styles.segBtnTextActive : styles.segBtnText}>{label}</Text>
             <Text style={styles.segFormat}>{roundData.formats?.[sIdx] ?? '—'}</Text>
           </TouchableOpacity>
@@ -478,32 +557,30 @@ export default function ScorecardScreen() {
       </View>
 
       <View style={styles.toggle}>
-        {(['GRID', 'FOCUS'] as const).map(m => (
+        {(['FOCUS', 'GRID'] as const).map(m => (
           <TouchableOpacity key={m}
             style={[styles.toggleBtn, viewMode === m && styles.toggleBtnActive]}
-            onPress={() => setViewMode(m)}
-          >
+            onPress={() => setViewMode(m)}>
             <Text style={viewMode === m ? styles.toggleTextActive : styles.toggleText}>
-              {m === 'GRID' ? '⊞ Full Scorecard' : '◎ Hole Focus'}
+              {m === 'FOCUS' ? '◎ Hole Focus' : '⊞ Full Scorecard'}
             </Text>
           </TouchableOpacity>
         ))}
       </View>
 
-      {/* Grid edit modal */}
+      {/* Score entry modal (grid mode) */}
       {editingHole && viewMode === 'GRID' && (
         <View style={styles.editOverlay}>
           <View style={styles.editModal}>
             <Text style={styles.editModalTitle}>
-              Hole {holeData[editingHole.holeIdx]?.hole} ·{' '}
-              {config.players.find(p => p.id === editingHole.playerId)?.name}
+              Hole {holeData[editingHole.holeIdx]?.hole} · {config.players.find(p => p.id === editingHole.playerId)?.name}
             </Text>
             <TextInput
               style={styles.editModalInput}
-              keyboardType="number-pad"
-              autoFocus value={editValue}
-              onChangeText={setEditValue} maxLength={2}
-              onSubmitEditing={commitEdit} returnKeyType="done" selectTextOnFocus
+              keyboardType="number-pad" autoFocus
+              value={editValue} onChangeText={setEditValue}
+              maxLength={2} onSubmitEditing={commitEdit}
+              returnKeyType="done" selectTextOnFocus
             />
             <View style={styles.editModalBtns}>
               <TouchableOpacity onPress={() => setEditingHole(null)} style={styles.editCancelBtn}>
@@ -537,29 +614,30 @@ const styles = StyleSheet.create({
   segBtnActive: { borderBottomWidth: 2.5, borderBottomColor: '#1e3a8a' },
   segBtnText: { fontSize: 13, fontWeight: '600', color: '#94a3b8' },
   segBtnTextActive: { fontSize: 13, fontWeight: '700', color: '#1e3a8a' },
-  segFormat: { fontSize: 9, color: '#94a3b8', marginTop: 1, fontWeight: '700' },
+  segFormat: { fontSize: 9, color: '#94a3b8', marginTop: 1, fontWeight: '700', letterSpacing: 0.5 },
   toggle: { flexDirection: 'row', padding: 8, backgroundColor: '#f1f5f9', gap: 6 },
   toggleBtn: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 8 },
   toggleBtnActive: { backgroundColor: '#fff', shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 4, elevation: 1 },
   toggleText: { fontSize: 13, color: '#94a3b8', fontWeight: '600' },
   toggleTextActive: { fontSize: 13, color: '#1e3a8a', fontWeight: '800' },
+  // Grid
   gridHeader: { flexDirection: 'row', backgroundColor: '#2d5016', paddingVertical: 8 },
   gridHeaderText: { fontSize: 9, fontWeight: '800', color: '#a3e635', letterSpacing: 0.8, textAlign: 'center' },
   gridHeaderHole: { fontSize: 11, fontWeight: '900', color: '#fff', textAlign: 'center' },
   gridHeaderPar: { fontSize: 9, color: '#86efac', textAlign: 'center' },
-  gridPlayerCol: { width: 88, paddingHorizontal: 6, justifyContent: 'center' },
+  gridPlayerCol: { width: 108, paddingHorizontal: 5, justifyContent: 'center' },
   gridMetricCol: { width: 52, paddingHorizontal: 4, justifyContent: 'center' },
   gridHoleCol: { width: 36, alignItems: 'center', justifyContent: 'center', paddingVertical: 3 },
   gridTotalCol: { width: 40, alignItems: 'center', justifyContent: 'center' },
   gridRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', paddingVertical: 2 },
   gridRowFirst: { paddingTop: 5 },
   gridRowNet: { backgroundColor: '#f8faff' },
-  gridRowPoints: { backgroundColor: '#f0fdf4', paddingBottom: 2 },
-  gridRowOpponent: { opacity: 0.75 },
-  gridPlayerCell: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  teamDot: { width: 7, height: 7, borderRadius: 4, flexShrink: 0 },
-  gridPlayerName: { fontSize: 10, fontWeight: '700', color: '#1e293b', flex: 1 },
-  ownerTag: { fontSize: 9 },
+  gridRowWLH: { backgroundColor: '#fafafa', paddingBottom: 4 },
+  gridRowOpponent: { opacity: 0.8 },
+  gridPlayerCell: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  avatarStack: { width: 48, height: 48, position: 'relative' },
+  avatarOverlap: { position: 'absolute', bottom: -6, right: -8 },
+  gridPlayerName: { fontSize: 11, fontWeight: '700', color: '#1e293b', flex: 1 },
   gridMetricText: { fontSize: 9, fontWeight: '600', color: '#94a3b8', textAlign: 'center' },
   gridNetText: { fontSize: 10, fontWeight: '600', color: '#64748b', textAlign: 'center' },
   popDot: { fontSize: 6, color: '#1e3a8a', textAlign: 'center' },
@@ -568,6 +646,7 @@ const styles = StyleSheet.create({
   scoreCell: { borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
   scoreCellText: { fontWeight: '800' },
   doubleBorder: { borderWidth: 3 },
+  // Focus
   focusContainer: { padding: 16, paddingBottom: 100 },
   focusNav: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
   navBtn: { padding: 8 },
@@ -579,18 +658,27 @@ const styles = StyleSheet.create({
   focusCard: { backgroundColor: '#1e3a8a', borderRadius: 20, padding: 28, alignItems: 'center', marginBottom: 20 },
   focusYardage: { fontSize: 54, fontWeight: '900', color: '#fff' },
   focusYardageLabel: { fontSize: 11, color: 'rgba(255,255,255,0.65)', letterSpacing: 2, marginTop: -4 },
-  focusParRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  focusParRow: { flexDirection: 'row', gap: 8, marginTop: 12, flexWrap: 'wrap', justifyContent: 'center' },
   focusBadge: { backgroundColor: 'rgba(255,255,255,0.15)', paddingHorizontal: 14, paddingVertical: 5, borderRadius: 20, color: '#fff', fontWeight: '700', fontSize: 13 },
-  focusGps: { fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 10 },
+  focusResultBadge: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 20 },
+  focusResultText: { color: '#fff', fontWeight: '800', fontSize: 12 },
+  combinedBanner: { backgroundColor: '#fef3c7', borderRadius: 10, padding: 10, marginBottom: 12, alignItems: 'center', borderWidth: 1, borderColor: '#fde68a' },
+  combinedBannerText: { fontSize: 12, fontWeight: '700', color: '#92400e' },
   focusSectionLabel: { fontSize: 10, fontWeight: '800', color: '#1e3a8a', letterSpacing: 1.5, marginBottom: 8 },
-  focusPlayerRow: { flexDirection: 'row', alignItems: 'center', gap: 0, backgroundColor: '#fff', borderRadius: 14, marginBottom: 10, borderWidth: 1, borderColor: '#e2e8f0', overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, elevation: 1 },
+  focusPlayerRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    backgroundColor: '#fff', borderRadius: 16, padding: 16, marginBottom: 12,
+    borderWidth: 1, borderColor: '#e2e8f0',
+    shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2,
+  },
   focusPlayerRowOpp: { backgroundColor: '#fef2f2', borderColor: '#fecaca' },
-  teamColorBar: { width: 4, alignSelf: 'stretch' },
-  focusPlayerInfo: { flex: 1, padding: 14 },
-  focusPlayerName: { fontSize: 16, fontWeight: '800', color: '#1e293b' },
-  focusPlayerMeta: { fontSize: 12, color: '#64748b', marginTop: 2 },
-  editBox: { alignItems: 'center', paddingRight: 14 },
-  focusInput: { width: 64, height: 64, borderWidth: 2.5, borderColor: '#1e3a8a', borderRadius: 14, textAlign: 'center', fontSize: 28, fontWeight: '900', color: '#1e3a8a', backgroundColor: '#f0f4ff' },
+  focusAvatarCol: { alignItems: 'center', justifyContent: 'center', minWidth: 90 },
+  focusPlayerInfo: { flex: 1 },
+  focusPlayerName: { fontSize: 17, fontWeight: '800', color: '#1e293b' },
+  focusPlayerMeta: { fontSize: 12, color: '#64748b', marginTop: 3 },
+  readOnlyTag: { fontSize: 10, color: '#94a3b8', marginTop: 4, fontStyle: 'italic' },
+  editBox: { alignItems: 'center' },
+  focusInput: { width: 68, height: 68, borderWidth: 2.5, borderColor: '#1e3a8a', borderRadius: 14, textAlign: 'center', fontSize: 30, fontWeight: '900', color: '#1e3a8a', backgroundColor: '#f0f4ff' },
   noPlayerCard: { backgroundColor: '#f8f9fa', borderRadius: 14, padding: 20, alignItems: 'center', borderWidth: 1, borderStyle: 'dashed', borderColor: '#cbd5e1' },
   noPlayerText: { fontSize: 13, color: '#94a3b8', textAlign: 'center', lineHeight: 20 },
   progressRow: { flexDirection: 'row', justifyContent: 'center', gap: 6, paddingTop: 24 },
@@ -606,4 +694,20 @@ const styles = StyleSheet.create({
   editCancelText: { fontWeight: '700', color: '#64748b' },
   editConfirmBtn: { flex: 1, padding: 12, borderRadius: 10, backgroundColor: '#1e3a8a', alignItems: 'center' },
   editConfirmText: { fontWeight: '700', color: '#fff' },
+  // Grid team grouping
+  gridTeamHeader: {
+    flexDirection: 'row', alignItems: 'center', paddingVertical: 7, paddingHorizontal: 4,
+  },
+  gridTeamHeaderText: {
+    fontSize: 10, fontWeight: '900', color: '#fff', letterSpacing: 1.5,
+  },
+  gridVsDivider: {
+    flexDirection: 'row', alignItems: 'center', marginVertical: 6, paddingHorizontal: 4,
+  },
+  gridVsLine: { flex: 1, height: 2, opacity: 0.4 },
+  gridVsBubble: {
+    backgroundColor: '#1e293b', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 4,
+    marginHorizontal: 8,
+  },
+  gridVsText: { fontSize: 11, fontWeight: '900', color: '#fff', letterSpacing: 1 },
 } as any);
